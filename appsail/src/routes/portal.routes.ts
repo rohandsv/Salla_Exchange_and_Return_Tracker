@@ -11,6 +11,25 @@ import { AppError } from "../lib/errors";
 export const portalRoutes = Router();
 
 /**
+ * ✅ Base route so GET /portal doesn't return NOT_FOUND
+ * Useful for health check / debugging in browser.
+ */
+portalRoutes.get("/", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "portal",
+    routes: [
+      "POST /portal/request-otp",
+      "POST /portal/verify-otp",
+      "GET  /portal/me",
+      "POST /portal/returns",
+      "GET  /portal/returns",
+      "GET  /portal/returns/:return_number",
+    ],
+  });
+});
+
+/**
  * Resolve tenant ROWID internally using portal_public_slug.
  */
 async function resolveTenantRowId(req: any, body: any): Promise<string> {
