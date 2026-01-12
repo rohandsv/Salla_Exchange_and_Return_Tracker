@@ -1,4 +1,5 @@
 import { getCatalystApp } from "../lib/catalyst";
+import { toCatalystDateTime } from "../lib/datetime";
 
 function assertRowIdDigits(id: string | number) {
   const v = String(id ?? "").trim();
@@ -117,5 +118,28 @@ export class TenantsRepo {
     });
 
     this.updateCacheByTenantId(tid, payload as any);
+  }
+
+  static async create(
+    req: any,
+    args: { portal_public_slug: string; status?: string }
+  ): Promise<any> {
+    const slug = String(args.portal_public_slug ?? "").trim();
+    if (!slug) throw new Error("portal_public_slug is required");
+
+    const app = getCatalystApp(req);
+    const table = app.datastore().table(this.tableName);
+
+    const now = toCatalystDateTime(new Date());
+
+    // Make sure these columns exist in your tenants table:
+    // portal_public_slug (string), status (string), created_at (datetime/string)
+    const row: any = await table.insertRow({
+      portal_public_slug: slug,
+      status: args.status ?? "draft",
+      created_at: now,
+    });
+
+    return row;
   }
 }

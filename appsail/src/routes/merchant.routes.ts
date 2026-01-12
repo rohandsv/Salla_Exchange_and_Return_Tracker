@@ -8,13 +8,48 @@ import { env } from "../env";
 
 export const merchantRoutes = Router();
 
+function isTruthy(v: any) {
+  const s = String(v ?? "").trim().toLowerCase();
+  return ["1", "true", "yes", "y", "on"].includes(s);
+}
+
+function isProdEnv() {
+  const nodeEnv = String(process.env.NODE_ENV ?? "").toLowerCase();
+  const catalystEnv = String((env as any).CATALYST_ENV ?? "").toLowerCase();
+  return nodeEnv === "production" || catalystEnv === "production";
+}
+
+/**
+ * ✅ Dev-only auto-provision toggle.
+ * - default ON in dev
+ * - forced OFF in prod
+ */
+function devAutoProvisionEnabled() {
+  if (isProdEnv()) return false;
+  const flag =
+    (env as any).DEV_AUTO_PROVISION_TENANT ??
+    process.env.DEV_AUTO_PROVISION_TENANT ??
+    "";
+  // default true in dev if not set
+  if (String(flag).trim() === "") return true;
+  return isTruthy(flag);
+}
+
 async function resolveTenantBySlug(req: any, portal_public_slug: string) {
   const slug = String(portal_public_slug ?? "").trim();
   if (!slug) throw new AppError(400, "portal_public_slug is required", "PORTAL_SLUG_REQUIRED");
 
-  const tenant = await TenantsRepo.findByPortalSlug(req, slug);
-  if (!tenant) throw new AppError(404, "Unknown portal_public_slug", "TENANT_NOT_FOUND");
+  let tenant = await TenantsRepo.findByPortalSlug(req, slug);
 
+  // ✅ DEV ONLY: auto-create tenant if missing (keeps PROD safe)
+  if (!tenant && devAutoProvisionEnabled()) {
+    tenant = await TenantsRepo.create(req, {
+      portal_public_slug: slug,
+      status: "draft",
+    });
+  }
+
+  if (!tenant) throw new AppError(404, "Unknown portal_public_slug", "TENANT_NOT_FOUND");
   return tenant;
 }
 
@@ -56,6 +91,7 @@ merchantRoutes.get("/oauth/start", async (req: any, res, next) => {
       })
       .parse(req.query);
 
+    // ✅ Will auto-provision only in dev, strict in prod
     await resolveTenantBySlug(req, qs.portal_public_slug);
 
     const mode = qs.mode || "redirect";
@@ -84,7 +120,9 @@ merchantRoutes.get("/oauth/status", async (req: any, res, next) => {
       })
       .parse(req.query);
 
+    // ✅ Will auto-provision only in dev, strict in prod
     const tenant = await resolveTenantBySlug(req, qs.portal_public_slug);
+
     const row = await SallaOauthTokensRepo.findByTenantId(req, tenant.ROWID);
 
     if (!row) {

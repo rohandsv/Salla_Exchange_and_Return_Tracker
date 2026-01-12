@@ -10,6 +10,17 @@ export class ApiError extends Error {
   }
 }
 
+export function toErrorMessage(e: unknown) {
+  if (e instanceof ApiError) return e.payload?.message || e.message || `Request failed (${e.status})`;
+  if (e instanceof Error) return e.message || "Unknown error";
+  if (typeof e === "string") return e;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return "Unknown error";
+  }
+}
+
 function baseUrl() {
   const v = (process.env.REACT_APP_API_BASE_URL || "").trim();
   if (!v) return "";
@@ -18,8 +29,12 @@ function baseUrl() {
 
 function join(path: string) {
   const b = baseUrl();
-  if (!b) return path;
-  return `${b}${path.startsWith("/") ? "" : "/"}${path}`;
+
+  // IMPORTANT: prevent relative calls from becoming /app/xyz when the SPA runs under /app/*
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+
+  if (!b) return normalizedPath;
+  return `${b}${normalizedPath}`;
 }
 
 async function readJsonSafe(res: Response) {
@@ -57,11 +72,7 @@ export async function apiFetch<T>(
     headers.Authorization = `Bearer ${opts.token}`;
   }
 
-  const res = await fetch(join(path), {
-    method,
-    headers,
-    body,
-  });
+  const res = await fetch(join(path), { method, headers, body });
 
   if (!res.ok) {
     const payload = (await readJsonSafe(res)) as ApiErrorShape | null;

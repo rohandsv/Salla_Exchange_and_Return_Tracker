@@ -36,13 +36,30 @@ async function resolveTenantRowId(req: any, body: any): Promise<string> {
   if (body.tenant_id) return String(body.tenant_id);
 
   if (body.portal_public_slug) {
-    const tenant = await TenantsRepo.findByPortalSlug(req, body.portal_public_slug);
-    if (!tenant) throw new AppError(400, "Invalid portal", "TENANT_NOT_FOUND");
+    const slug = String(body.portal_public_slug ?? "").trim();
+    if (!slug) throw new AppError(400, "portal_public_slug is required", "TENANT_REQUIRED");
+
+    let tenant = await TenantsRepo.findByPortalSlug(req, slug);
+
+    // ✅ dev-only auto-provision
+    const nodeEnv = String(process.env.NODE_ENV ?? "").toLowerCase();
+    const catalystEnv = String((process.env as any).CATALYST_ENV ?? "").toLowerCase();
+    const isProd = nodeEnv === "production" || catalystEnv === "production";
+
+    const flag = process.env.DEV_AUTO_PROVISION_TENANT;
+    const allowAuto = !isProd && (flag ? ["1", "true", "yes", "on"].includes(String(flag).toLowerCase()) : true);
+
+    if (!tenant && allowAuto) {
+      tenant = await TenantsRepo.create(req, { portal_public_slug: slug, status: "draft" });
+    }
+
+    if (!tenant) throw new AppError(404, "Unknown portal_public_slug", "TENANT_NOT_FOUND");
     return String(tenant.ROWID);
   }
 
   throw new AppError(400, "portal_public_slug is required", "TENANT_REQUIRED");
 }
+
 
 /**
  * 1) Request OTP
