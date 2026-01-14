@@ -19,92 +19,121 @@ function isProdEnv() {
   return nodeEnv === "production" || catalystEnv === "production";
 }
 
-/**
- * ✅ Dev-only auto-provision toggle.
- * - default ON in dev
- * - forced OFF in prod
- */
 function devAutoProvisionEnabled() {
   if (isProdEnv()) return false;
-  const flag =
-    (env as any).DEV_AUTO_PROVISION_TENANT ??
-    process.env.DEV_AUTO_PROVISION_TENANT ??
-    "";
-  // default true in dev if not set
+  const flag = (env as any).DEV_AUTO_PROVISION_TENANT ?? process.env.DEV_AUTO_PROVISION_TENANT ?? "";
   if (String(flag).trim() === "") return true;
   return isTruthy(flag);
 }
 
+function normalizeSlug(slug: string) {
+  return String(slug ?? "").trim();
+}
+
+function validateSlug(slug: string) {
+  const s = normalizeSlug(slug);
+  if (!s) throw new AppError(400, "portal_public_slug is required", "PORTAL_SLUG_REQUIRED");
+  if (s.length > 120) throw new AppError(400, "portal_public_slug too long", "PORTAL_SLUG_INVALID");
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9\-._~]*$/.test(s)) {
+    throw new AppError(400, "portal_public_slug contains invalid characters", "PORTAL_SLUG_INVALID");
+  }
+  return s;
+}
+
 async function resolveTenantBySlug(req: any, portal_public_slug: string) {
-  const slug = String(portal_public_slug ?? "").trim();
-  if (!slug) throw new AppError(400, "portal_public_slug is required", "PORTAL_SLUG_REQUIRED");
+  const slug = validateSlug(portal_public_slug);
 
   let tenant = await TenantsRepo.findByPortalSlug(req, slug);
 
-  // ✅ DEV ONLY: auto-create tenant if missing (keeps PROD safe)
   if (!tenant && devAutoProvisionEnabled()) {
-    tenant = await TenantsRepo.create(req, {
-      portal_public_slug: slug,
-      status: "draft",
-    });
+    tenant = await TenantsRepo.create(req, { portal_public_slug: slug, status: "draft" });
   }
 
   if (!tenant) throw new AppError(404, "Unknown portal_public_slug", "TENANT_NOT_FOUND");
   return tenant;
 }
 
-function requireEnvString(name: string, val: any) {
-  const s = typeof val === "string" ? val.trim() : "";
-  if (!s) throw new AppError(500, `Missing ${name}`, "MERCHANT_CONFIG_MISSING");
-  return s;
-}
-
-function requireValidAbsoluteUrl(name: string, val: any) {
-  const s = requireEnvString(name, val);
+merchantRoutes.post("/tenants", async (req: any, res, next) => {
   try {
-    // eslint-disable-next-line no-new
-    new URL(s);
-  } catch {
-    throw new AppError(500, `Invalid URL in ${name}`, "MERCHANT_CONFIG_INVALID");
+    const body = z
+      .object({
+        portal_public_slug: z.string().min(1),
+      })
+      .parse(req.body);
+
+    const slug = validateSlug(body.portal_public_slug);
+
+    let tenant = await TenantsRepo.findByPortalSlug(req, slug);
+
+    if (!tenant) {
+      await TenantsRepo.create(req, { portal_public_slug: slug, status: "draft" });
+      tenant = await TenantsRepo.findByPortalSlug(req, slug);
+      if (!tenant) {
+        throw new AppError(500, "Tenant created but could not be loaded", "TENANT_CREATE_FAILED");
+      }
+
+      return res.status(201).json({
+        ok: true,
+        created: true,
+        tenant: {
+          tenant_id: tenant.ROWID,
+          portal_public_slug: tenant.portal_public_slug,
+          status: tenant.status ?? null,
+        },
+      });
+    }
+
+    return res.json({
+      ok: true,
+      created: false,
+      tenant: {
+        tenant_id: tenant.ROWID,
+        portal_public_slug: tenant.portal_public_slug,
+        status: tenant.status ?? null,
+      },
+    });
+  } catch (e) {
+    next(e);
   }
-  return s;
-}
-
-function buildInstallUrl(args: { portal_public_slug: string }): string {
-  const base = (env as any).SALLA_INSTALL_URL_BASE || "https://s.salla.sa/apps/install";
-  const appId = (env as any).SALLA_APP_ID;
-
-  const baseUrl = requireValidAbsoluteUrl("SALLA_INSTALL_URL_BASE", String(base)).replace(/\/+$/, "");
-  const sallaAppId = requireEnvString("SALLA_APP_ID", appId);
-
-  const u = new URL(`${baseUrl}/${encodeURIComponent(sallaAppId)}`);
-  u.searchParams.set("portal_public_slug", String(args.portal_public_slug || "").trim());
-  return u.toString();
-}
+});
 
 merchantRoutes.get("/oauth/start", async (req: any, res, next) => {
   try {
     const qs = z
       .object({
         portal_public_slug: z.string().min(1),
-        mode: z.enum(["json", "redirect", "install"]).optional(),
+        mode: z.enum(["json", "redirect"]).optional(),
       })
       .parse(req.query);
 
-    // ✅ Will auto-provision only in dev, strict in prod
     await resolveTenantBySlug(req, qs.portal_public_slug);
 
+    const result = await SallaOAuthService.start(req, { portal_public_slug: qs.portal_public_slug });
+
     const mode = qs.mode || "redirect";
+    if (mode === "json") return res.json(result);
+    return res.redirect(result.url);
+  } catch (e) {
+    next(e);
+  }
+});
 
-    if (mode === "install") {
-      const installUrl = buildInstallUrl({ portal_public_slug: qs.portal_public_slug });
-      return res.redirect(installUrl);
-    }
+merchantRoutes.post("/oauth/start", async (req: any, res, next) => {
+  try {
+    const input = { ...req.query, ...(req.body ?? {}) };
 
-    const result = await SallaOAuthService.start(req, {
-      portal_public_slug: qs.portal_public_slug,
-    });
+    const qs = z
+      .object({
+        portal_public_slug: z.string().min(1),
+        mode: z.enum(["json", "redirect"]).optional(),
+      })
+      .parse(input);
 
+    await resolveTenantBySlug(req, qs.portal_public_slug);
+
+    const result = await SallaOAuthService.start(req, { portal_public_slug: qs.portal_public_slug });
+
+    const mode = qs.mode || "redirect";
     if (mode === "json") return res.json(result);
     return res.redirect(result.url);
   } catch (e) {
@@ -114,15 +143,8 @@ merchantRoutes.get("/oauth/start", async (req: any, res, next) => {
 
 merchantRoutes.get("/oauth/status", async (req: any, res, next) => {
   try {
-    const qs = z
-      .object({
-        portal_public_slug: z.string().min(1),
-      })
-      .parse(req.query);
-
-    // ✅ Will auto-provision only in dev, strict in prod
+    const qs = z.object({ portal_public_slug: z.string().min(1) }).parse(req.query);
     const tenant = await resolveTenantBySlug(req, qs.portal_public_slug);
-
     const row = await SallaOauthTokensRepo.findByTenantId(req, tenant.ROWID);
 
     if (!row) {
@@ -138,6 +160,7 @@ merchantRoutes.get("/oauth/status", async (req: any, res, next) => {
           store_domain: tenant.store_domain ?? null,
         },
         token: null,
+        oauth_mode: SallaOAuthService.mode(),
       });
     }
 
@@ -164,6 +187,7 @@ merchantRoutes.get("/oauth/status", async (req: any, res, next) => {
         installed_at: row.installed_at ?? null,
         uninstalled_at: row.uninstalled_at ?? null,
       },
+      oauth_mode: SallaOAuthService.mode(),
     });
   } catch (e) {
     next(e);

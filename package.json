@@ -1,8 +1,11 @@
 {
-  "devDependencies": {
-    "@types/cors": "^2.8.19"
-  },
-  "dependencies": {
-    "18": "^0.0.0"
+  "name": "salla-returns-app",
+  "private": true,
+  "scripts": {
+    "install:all": "npm i --prefix appsail && npm i --prefix web-client",
+    "build:appsail": "npm run build --prefix appsail",
+    "build:web": "npm run build --prefix web-client",
+
+    "start": "npm start"
   }
 }

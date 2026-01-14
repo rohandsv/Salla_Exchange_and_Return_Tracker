@@ -1,4 +1,3 @@
-// FILE: appsail/src/services/sallaOAuth.service.ts
 import crypto from "crypto";
 import { env } from "../env";
 import { AppError } from "../lib/errors";
@@ -8,6 +7,8 @@ import { getCatalystApp } from "../lib/catalyst";
 import { OAuthStatesRepo } from "../repositories/oauthStates.repo";
 import { SallaOauthTokensRepo } from "../repositories/sallaOauthTokens.repo";
 import { TenantsRepo } from "../repositories/tenants.repo";
+
+type OAuthMode = "easy" | "custom";
 
 function assertDigits(v: any) {
   const s = String(v ?? "").trim();
@@ -24,7 +25,6 @@ function requireEnvString(name: string, val: any) {
 function requireEnvUrl(name: string, val: any) {
   const s = requireEnvString(name, val);
   try {
-    // eslint-disable-next-line no-new
     new URL(s);
   } catch {
     throw new AppError(500, `Invalid URL in ${name}`, "OAUTH_NOT_CONFIGURED");
@@ -32,11 +32,15 @@ function requireEnvUrl(name: string, val: any) {
   return s;
 }
 
-function getOAuthConfig() {
+function getMode(): OAuthMode {
+  const raw = String((env as any).SALLA_OAUTH_MODE ?? "easy").trim().toLowerCase();
+  return raw === "custom" ? "custom" : "easy";
+}
+
+function getOAuthCoreConfig() {
   return {
     clientId: requireEnvString("SALLA_CLIENT_ID", (env as any).SALLA_CLIENT_ID),
     clientSecret: requireEnvString("SALLA_CLIENT_SECRET", (env as any).SALLA_CLIENT_SECRET),
-    authorizeUrl: requireEnvUrl("SALLA_OAUTH_AUTHORIZE_URL", (env as any).SALLA_OAUTH_AUTHORIZE_URL),
     tokenUrl: requireEnvUrl("SALLA_OAUTH_TOKEN_URL", (env as any).SALLA_OAUTH_TOKEN_URL),
   };
 }
@@ -44,14 +48,28 @@ function getOAuthConfig() {
 function resolveRedirectUri(): string {
   const override = (env as any).SALLA_OAUTH_REDIRECT_URI;
   if (override && typeof override === "string" && override.trim()) {
-    // must be absolute url
     return requireEnvUrl("SALLA_OAUTH_REDIRECT_URI", override.trim());
   }
-
   const base = String(env.APP_BASE_URL || "").replace(/\/+$/, "");
-  // APP_BASE_URL must be absolute when oauth is enabled (env.ts already enforces)
   const redirect = `${base}/auth/callback`;
   return requireEnvUrl("APP_BASE_URL (for redirect)", redirect);
+}
+
+function getOAuthCustomConfig() {
+  const core = getOAuthCoreConfig();
+  return {
+    ...core,
+    authorizeUrl: requireEnvUrl("SALLA_OAUTH_AUTHORIZE_URL", (env as any).SALLA_OAUTH_AUTHORIZE_URL),
+    redirectUri: resolveRedirectUri(),
+  };
+}
+
+function buildInstallUrl(): string {
+  const base =
+    String((env as any).SALLA_INSTALL_URL_BASE ?? (env as any).SALLA_INSTALL_URL_BASE_URL ?? "").trim() ||
+    "https://s.salla.sa/apps/install";
+  const appId = requireEnvString("SALLA_APP_ID", (env as any).SALLA_APP_ID);
+  return `${base.replace(/\/+$/, "")}/${encodeURIComponent(appId)}`;
 }
 
 function toExpiresAt(expiresInSeconds: number): string | null {
@@ -62,18 +80,14 @@ function toExpiresAt(expiresInSeconds: number): string | null {
 function shouldRefresh(expiresAt: string | null | undefined): boolean {
   const skewSeconds = Number((env as any).SALLA_TOKEN_REFRESH_SKEW_SECONDS ?? 120);
   const skewMs = (Number.isFinite(skewSeconds) && skewSeconds > 0 ? skewSeconds : 120) * 1000;
-
   if (!expiresAt) return true;
-
   const isoLike = String(expiresAt).replace(" ", "T");
   const t = Date.parse(isoLike);
   if (!Number.isFinite(t)) return true;
-
   return Date.now() + skewMs >= t;
 }
 
 async function httpForm(tokenUrl: string, form: URLSearchParams) {
-  // avoid hanging forever
   const controller = new AbortController();
   const timeoutMs = 15000;
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -91,7 +105,7 @@ async function httpForm(tokenUrl: string, form: URLSearchParams) {
     try {
       json = text ? JSON.parse(text) : {};
     } catch {
-      // ignore parse; we will use text in errors
+      json = {};
     }
 
     return { ok: resp.ok, status: resp.status, text, json };
@@ -100,17 +114,11 @@ async function httpForm(tokenUrl: string, form: URLSearchParams) {
   }
 }
 
-/**
- * Optional, config-driven verification (NO hardcoded endpoint).
- */
-async function verifyStoreProfile(accessToken: string): Promise<{
-  salla_store_id?: string;
-  store_name?: string;
-  store_domain?: string | null;
-} | null> {
+async function verifyStoreProfile(
+  accessToken: string
+): Promise<{ salla_store_id?: string; store_name?: string; store_domain?: string | null } | null> {
   const base = (env as any).SALLA_API_BASE_URL;
   const endpoint = (env as any).SALLA_VERIFY_ENDPOINT;
-
   if (!base || !endpoint) return null;
   if (typeof base !== "string" || typeof endpoint !== "string") return null;
 
@@ -127,10 +135,7 @@ async function verifyStoreProfile(accessToken: string): Promise<{
   try {
     const resp = await fetch(url, {
       method: "GET",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json",
-      },
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
       signal: controller.signal,
     });
 
@@ -145,11 +150,9 @@ async function verifyStoreProfile(accessToken: string): Promise<{
     }
 
     const data = payload?.data ?? payload;
-
     const id = data?.id ?? data?.store_id ?? data?.store?.id ?? payload?.store_id ?? payload?.id;
     const name = data?.name ?? data?.store_name ?? data?.store?.name ?? payload?.name;
-    const domain =
-      data?.domain ?? data?.store_domain ?? data?.store?.domain ?? payload?.domain ?? null;
+    const domain = data?.domain ?? data?.store_domain ?? data?.store?.domain ?? payload?.domain ?? null;
 
     const salla_store_id = id != null ? String(id).trim() : undefined;
     const store_name = name != null ? String(name).trim() : undefined;
@@ -163,10 +166,13 @@ async function verifyStoreProfile(accessToken: string): Promise<{
 }
 
 export class SallaOAuthService {
+  static mode(): OAuthMode {
+    return getMode();
+  }
+
   private static async getTenantUniqueKey(req: any, tenantRowId: string): Promise<string> {
     const app = getCatalystApp(req);
     const rowId = assertDigits(tenantRowId);
-
     const tenant: any = await app.datastore().table("tenants").getRow(rowId as any).catch(() => null);
 
     const storeDomain = tenant?.store_domain ? String(tenant.store_domain).trim() : "";
@@ -177,30 +183,24 @@ export class SallaOAuthService {
     return `tenant:${rowId}`;
   }
 
-  /**
-   * Start OAuth -> authorization URL
-   */
   static async start(req: any, args: { portal_public_slug: string }) {
-    const { clientId, authorizeUrl } = getOAuthConfig();
-
     const slug = String(args.portal_public_slug ?? "").trim();
     if (!slug) throw new AppError(400, "Missing portal_public_slug", "OAUTH_START_INVALID");
 
     const tenant = await TenantsRepo.findByPortalSlug(req, slug);
     if (!tenant) throw new AppError(404, "Unknown portal_public_slug", "TENANT_NOT_FOUND");
 
+    if (getMode() === "easy") {
+      return { ok: true, url: buildInstallUrl() };
+    }
+
+    const { clientId, authorizeUrl, redirectUri } = getOAuthCustomConfig();
     const tenantId = assertDigits(tenant.ROWID);
 
     const state = crypto.randomBytes(24).toString("base64url");
     const expiresAt = toCatalystDateTime(new Date(Date.now() + 10 * 60 * 1000));
 
-    await OAuthStatesRepo.insert(req, {
-      tenant_id: tenantId,
-      state,
-      expires_at: expiresAt,
-    });
-
-    const redirectUri = resolveRedirectUri();
+    await OAuthStatesRepo.insert(req, { tenant_id: tenantId, state, expires_at: expiresAt });
 
     const params = new URLSearchParams({
       response_type: "code",
@@ -210,18 +210,17 @@ export class SallaOAuthService {
     });
 
     const scope = (env as any).SALLA_OAUTH_SCOPE;
-    if (scope && typeof scope === "string" && scope.trim()) {
-      params.set("scope", scope.trim());
-    }
+    if (scope && typeof scope === "string" && scope.trim()) params.set("scope", scope.trim());
 
     return { ok: true, url: `${authorizeUrl}?${params.toString()}`, state_expires_at: expiresAt };
   }
 
-  /**
-   * Callback -> exchange tokens -> store encrypted -> verify -> update tenants
-   */
   static async callback(req: any, args: { code: string; state: string }) {
-    const { clientId, clientSecret, tokenUrl } = getOAuthConfig();
+    if (getMode() === "easy") {
+      throw new AppError(400, "OAuth callback not used in easy mode", "OAUTH_CALLBACK_NOT_SUPPORTED");
+    }
+
+    const { clientId, clientSecret, tokenUrl, redirectUri } = getOAuthCustomConfig();
 
     const code = String(args.code ?? "").trim();
     const state = String(args.state ?? "").trim();
@@ -231,8 +230,6 @@ export class SallaOAuthService {
     if (!st) throw new AppError(400, "Invalid/expired state", "OAUTH_STATE_INVALID");
 
     const tenantId = assertDigits(st.tenant_id);
-
-    const redirectUri = resolveRedirectUri();
 
     const form = new URLSearchParams({
       grant_type: "authorization_code",
@@ -245,13 +242,7 @@ export class SallaOAuthService {
     const { ok, status, text, json } = await httpForm(tokenUrl, form);
 
     if (!ok) {
-      // IMPORTANT: do NOT delete state on failure; allow retry until it expires.
-      throw new AppError(
-        400,
-        "Token exchange failed",
-        "OAUTH_TOKEN_EXCHANGE_FAILED",
-        `HTTP ${status}: ${text}`
-      );
+      throw new AppError(400, "Token exchange failed", "OAUTH_TOKEN_EXCHANGE_FAILED", `HTTP ${status}: ${text}`);
     }
 
     const accessToken = String(json.access_token || "").trim();
@@ -260,11 +251,8 @@ export class SallaOAuthService {
     const expiresIn = Number(json.expires_in || 0);
     const scope = json.scope ? String(json.scope) : null;
 
-    if (!accessToken) {
-      throw new AppError(400, "Missing access_token", "OAUTH_TOKEN_INVALID");
-    }
+    if (!accessToken) throw new AppError(400, "Missing access_token", "OAUTH_TOKEN_INVALID");
 
-    // ✅ Now that we have a successful exchange, consume state (prevents replay)
     await OAuthStatesRepo.deleteByRowId(req, st.ROWID);
 
     const nowStr = toCatalystDateTime(new Date());
@@ -274,20 +262,14 @@ export class SallaOAuthService {
     const existing = await SallaOauthTokensRepo.findByTenantId(req, tenantId);
 
     await SallaOauthTokensRepo.upsertByTenant(req, tenantId, {
-      tenant_unique_key: existing?.tenant_unique_key
-        ? String(existing.tenant_unique_key)
-        : tenantUniqueKey,
+      tenant_unique_key: existing?.tenant_unique_key ? String(existing.tenant_unique_key) : tenantUniqueKey,
       token_status: "active",
-
       access_token_enc: encryptText(accessToken),
       refresh_token_enc: refreshToken ? encryptText(refreshToken) : existing?.refresh_token_enc ?? null,
-
       token_type: tokenType,
       scopes: scope,
-
       access_token_expires_at: accessTokenExpiresAt,
       last_token_refresh_at: nowStr,
-
       installed_at: existing?.installed_at ? String(existing.installed_at) : nowStr,
       uninstalled_at: null,
     });
@@ -304,15 +286,12 @@ export class SallaOAuthService {
       return { ok: true, verified: true };
     }
 
-    await TenantsRepo.updateSallaConnectionFields(req, tenantId, {
-      status: "connected_unverified",
-    });
+    await TenantsRepo.updateSallaConnectionFields(req, tenantId, { status: "connected_unverified" });
     return { ok: true, verified: false };
   }
 
   static async getValidAccessTokenForTenant(req: any, tenantId: string) {
-    const { clientId, clientSecret, tokenUrl } = getOAuthConfig(); // ensure configured
-    void clientId; void clientSecret; // (kept for clarity; used below)
+    const { clientId, clientSecret, tokenUrl } = getOAuthCoreConfig();
 
     const tid = assertDigits(tenantId);
     const row = await SallaOauthTokensRepo.findByTenantId(req, tid);
@@ -335,8 +314,8 @@ export class SallaOAuthService {
 
     const form = new URLSearchParams({
       grant_type: "refresh_token",
-      client_id: String((env as any).SALLA_CLIENT_ID),
-      client_secret: String((env as any).SALLA_CLIENT_SECRET),
+      client_id: clientId,
+      client_secret: clientSecret,
       refresh_token: refreshToken,
     });
 
@@ -368,13 +347,5 @@ export class SallaOAuthService {
     });
 
     return newAccess;
-  }
-
-  static async handleUninstall(req: any, tenantId: string) {
-    const tid = assertDigits(tenantId);
-    const nowStr = toCatalystDateTime(new Date());
-
-    await SallaOauthTokensRepo.revoke(req, tid, nowStr);
-    await TenantsRepo.updateSallaConnectionFields(req, tid, { status: "uninstalled" });
   }
 }

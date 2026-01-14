@@ -15,6 +15,12 @@ type MerchantOAuthStatusApiRes = {
   };
 };
 
+type MerchantOAuthStartApiRes = {
+  ok: true;
+  url: string;
+  state_expires_at?: string;
+};
+
 export async function merchantOAuthStatus(portal_public_slug: string): Promise<MerchantOAuthStatusRes> {
   const res = await apiFetch<MerchantOAuthStatusApiRes>(
     `/merchant/oauth/status?portal_public_slug=${encodeURIComponent(portal_public_slug)}`
@@ -27,14 +33,14 @@ export async function merchantOAuthStatus(portal_public_slug: string): Promise<M
   };
 }
 
-/**
- * ✅ Start OAuth via browser redirect (GET)
- * Backend route is merchantRoutes.get("/oauth/start", ...)
- */
-export function merchantOAuthStartRedirect(portal_public_slug: string) {
-  const qs = new URLSearchParams({
-    portal_public_slug,
-    mode: "redirect", // optional (default is redirect in your backend)
-  });
-  window.location.assign(`/merchant/oauth/start?${qs.toString()}`);
+export async function merchantOAuthStart(portal_public_slug: string): Promise<MerchantOAuthStartApiRes> {
+  return apiFetch<MerchantOAuthStartApiRes>(
+    `/merchant/oauth/start?portal_public_slug=${encodeURIComponent(portal_public_slug)}&mode=json`
+  );
+}
+
+export async function merchantOAuthStartRedirect(portal_public_slug: string) {
+  const res = await merchantOAuthStart(portal_public_slug);
+  if (!res?.url) throw new Error("Start did not return a URL");
+  window.location.assign(res.url);
 }

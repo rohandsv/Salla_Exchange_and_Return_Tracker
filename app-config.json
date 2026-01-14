@@ -2,28 +2,7 @@
   "command": "npm start",
   "build_path": "appsail",
   "stack": "node18",
-  "env_variables": {
-    "NODE_ENV": "development",
-    "TZ": "Asia/Riyadh",
-
-    "APP_BASE_URL": "http://localhost:3001",
-
-    "ENCRYPTION_KEY_B64": "TVxL9gPkeIFqOqvctP/OvoV0npJv+6HEvFaLfhZyYVk=",
-    "PORTAL_SESSION_SIGNING_KEY": "GtlIpvJl6jqmoYp33vR4xtsziQB_hJkYqx1y4BqKaBw",
-    "SECURITY_PEPPER": "PMf7k7dQNWODgHbqIjqq4zMit3twzUrt4wIpA2En9vM",
-
-    "OTP_TTL_SECONDS": "300",
-    "OTP_MAX_ATTEMPTS": "5",
-    "OTP_LOCKOUT_SECONDS": "900",
-    "OTP_RATE_LIMIT_WINDOW_SECONDS": "60",
-    "OTP_RATE_LIMIT_MAX_IN_WINDOW": "3",
-
-    "PORTAL_SESSION_TTL_SECONDS": "3600",
-    "PORTAL_SESSION_TOUCH_INTERVAL_SECONDS": "300",
-
-    "DATA_RETENTION_DAYS": "365",
-    "STRICT_OTP_ORDER_BINDING": "true"
-  },
+  "env_variables": {},
   "memory": 256,
   "scripts": {}
 }

@@ -1,7 +1,6 @@
 // appsail/src/app.ts
-import express from "express";
+import express, { type Request, type Response, type NextFunction } from "express";
 import helmet from "helmet";
-import cors from "cors";
 
 import { requestId } from "./middlewares/requestId";
 import { logger } from "./lib/logger";
@@ -13,14 +12,6 @@ import { merchantRoutes } from "./routes/merchant.routes";
 import { authRoutes } from "./routes/auth.routes";
 import { webhooksRoutes } from "./routes/webhooks.routes";
 
-// OPTIONAL: if you already have webhooks routes, uncomment
-// import { webhooksRoutes } from "./routes/webhooks.routes";
-
-/**
- * Raw body saver:
- * - Needed when webhook signature verification requires the exact raw body
- * - Safe: only stores buffer on req.rawBody, does not change your req.body behavior
- */
 function rawBodySaver(req: any, _res: any, buf: Buffer) {
   if (buf?.length) req.rawBody = buf;
 }
@@ -28,65 +19,77 @@ function rawBodySaver(req: any, _res: any, buf: Buffer) {
 export const app = express();
 
 app.use(helmet());
-app.use(cors({ origin: true }));
 
-/**
- * IMPORTANT:
- * - Use a verify hook to capture raw body (for webhook signature verification),
- *   while still parsing JSON normally for all routes.
- */
-app.use(express.json({ limit: "1mb", verify: rawBodySaver }));
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") return res.status(204).end();
+  next();
+});
+
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+app.use((req, _res, next) => {
+  const origin = req.headers.origin as string | undefined;
+  if (!origin) return next();
+  if (allowedOrigins.length && !allowedOrigins.includes(origin)) {
+    return next(new AppError(403, "CORS not allowed", "CORS_NOT_ALLOWED"));
+  }
+  next();
+});
 
 app.use(requestId);
 
-/**
- * BigInt-safe JSON serialization (Catalyst ROWID can behave like BigInt)
- */
-app.set("json replacer", (_k: string, v: unknown) => (typeof v === "bigint" ? (v as bigint).toString() : v));
+app.set("json replacer", (_k: string, v: unknown) =>
+  typeof v === "bigint" ? (v as bigint).toString() : v
+);
 
-/**
- * Routes
- */
+app.use("/webhooks", express.json({ limit: "2mb", verify: rawBodySaver }));
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+
 app.use("/health", healthRoutes);
 app.use("/portal", portalRoutes);
 app.use("/merchant", merchantRoutes);
 app.use("/auth", authRoutes);
 app.use("/webhooks", webhooksRoutes);
 
-// OPTIONAL: if you already have webhook routes, mount them here
-// app.use("/webhooks", webhooksRoutes);
-
-app.get("/", (_req, res) => {
+app.get("/", (_req: Request, res: Response) => {
   res.json({
     ok: true,
     service: "appsail",
-    routes: ["/health", "/portal", "/merchant", "/auth" /*, "/webhooks"*/],
+    routes: ["/health", "/portal", "/merchant", "/auth", "/webhooks"],
   });
 });
 
-/**
- * 404 (AFTER all routes)
- */
-app.use((_req, _res, next) => next(new AppError(404, "Not found", "NOT_FOUND")));
+app.use((_req: Request, _res: Response, next: NextFunction) =>
+  next(new AppError(404, "Not found", "NOT_FOUND"))
+);
 
-/**
- * Error handler (LAST)
- */
-app.use((err: any, req: any, res: any, _next: any) => {
+app.use((err: any, req: any, res: any, _next: NextFunction) => {
   const status = err instanceof AppError ? err.status : 500;
+  const requestIdValue = req?.requestId;
 
-  logger.error({
-    requestId: req?.requestId,
-    status,
-    code: err?.code || "UNHANDLED",
-    msg: err?.message || "Unhandled error",
-    stack: status === 500 ? err?.stack : undefined,
-  });
+  logger.error(
+    {
+      requestId: requestIdValue,
+      status,
+      code: err?.code || (err instanceof AppError ? err.code : "UNHANDLED"),
+      msg: err?.message || "Unhandled error",
+      stack: status === 500 ? err?.stack : undefined,
+      path: req?.path,
+      method: req?.method,
+    },
+    "request_failed"
+  );
+
+  if (res.headersSent) return;
 
   res.status(status).json({
     ok: false,
-    request_id: req?.requestId,
-    code: err?.code || "INTERNAL",
+    request_id: requestIdValue,
+    code: err?.code || (err instanceof AppError ? err.code : "INTERNAL"),
     error: status === 500 ? "Internal error" : err?.message,
   });
 });

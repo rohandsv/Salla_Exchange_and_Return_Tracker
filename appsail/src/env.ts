@@ -1,91 +1,135 @@
 import { z } from "zod";
 
+const num = (def: number) =>
+  z.preprocess((v) => {
+    if (v === undefined || v === null || String(v).trim() === "") return def;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : def;
+  }, z.number());
+
 const schema = z
   .object({
-    NODE_ENV: z.string().default("development"),
-    TZ: z.string().default("Asia/Riyadh"),
+    NODE_ENV: z.string().optional(),
+    TZ: z.string().optional(),
 
-    APP_BASE_URL: z.string().min(1),
+    CATALYST_ENV: z.string().optional(),
 
-    SECURITY_PEPPER: z.string().min(32),
-    ENCRYPTION_KEY_B64: z.string().min(1),
-    PORTAL_SESSION_SIGNING_KEY: z.string().min(1),
+    APP_BASE_URL: z.string().url().optional(),
 
-    OTP_TTL_SECONDS: z.coerce.number().int().positive(),
-    OTP_MAX_ATTEMPTS: z.coerce.number().int().positive(),
-    OTP_LOCKOUT_SECONDS: z.coerce.number().int().positive(),
-    OTP_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive(),
-    OTP_RATE_LIMIT_MAX_IN_WINDOW: z.coerce.number().int().positive(),
+    SALLA_OAUTH_MODE: z.enum(["easy", "custom"]).optional(),
 
-    PORTAL_SESSION_TTL_SECONDS: z.coerce.number().int().positive(),
-    PORTAL_SESSION_TOUCH_INTERVAL_SECONDS: z.coerce.number().int().positive(),
-
-    DATA_RETENTION_DAYS: z.coerce.number().int().positive(),
+    SALLA_APP_ID: z.string().min(1).optional(),
+    SALLA_INSTALL_URL_BASE: z.string().optional(),
+    SALLA_INSTALL_URL_BASE_URL: z.string().optional(),
 
     SALLA_CLIENT_ID: z.string().min(1).optional(),
     SALLA_CLIENT_SECRET: z.string().min(1).optional(),
+    SALLA_OAUTH_TOKEN_URL: z.string().url().optional(),
 
     SALLA_OAUTH_AUTHORIZE_URL: z.string().url().optional(),
-    SALLA_OAUTH_TOKEN_URL: z.string().url().optional(),
-    SALLA_API_BASE_URL: z.string().url().optional(),
     SALLA_OAUTH_REDIRECT_URI: z.string().url().optional(),
+    SALLA_OAUTH_SCOPE: z.string().optional(),
 
-    SALLA_OAUTH_SCOPE: z.string().min(1).optional(),
-    SALLA_VERIFY_ENDPOINT: z.string().min(1).optional(),
+    SALLA_TOKEN_REFRESH_SKEW_SECONDS: num(120),
 
-    SALLA_TOKEN_REFRESH_SKEW_SECONDS: z.coerce.number().int().positive().default(120),
+    SALLA_API_BASE_URL: z.string().url().optional(),
+    SALLA_VERIFY_ENDPOINT: z.string().optional(),
 
-    SALLA_APP_ID: z.string().min(1).optional(),
-    SALLA_INSTALL_URL_BASE: z.string().url().optional(),
+    SALLA_WEBHOOK_SECRET_KEY: z.string().optional(),
+    SALLA_WEBHOOK_SECRET: z.string().optional(),
+    WEBHOOK_SECRET: z.string().optional(),
 
-    MERCHANT_DEBUG_KEY: z.string().min(8).optional(),
+    DEV_AUTO_PROVISION_TENANT: z.string().optional(),
+
+    SECURITY_PEPPER: z.string().min(1),
+    ENCRYPTION_KEY_B64: z.string().min(1),
+
+    MERCHANT_DEBUG_KEY: z.string().optional(),
+
+    OTP_RATE_LIMIT_WINDOW_SECONDS: num(300),
+    OTP_RATE_LIMIT_MAX_IN_WINDOW: num(5),
+    OTP_TTL_SECONDS: num(300),
+    OTP_MAX_ATTEMPTS: num(5),
+    OTP_LOCKOUT_SECONDS: num(900),
+
+    PORTAL_SESSION_TTL_SECONDS: num(3600),
+    PORTAL_SESSION_TOUCH_INTERVAL_SECONDS: num(300),
   })
   .superRefine((v, ctx) => {
-    const oauthEnabled =
-      !!v.SALLA_CLIENT_ID ||
-      !!v.SALLA_CLIENT_SECRET ||
-      !!v.SALLA_OAUTH_AUTHORIZE_URL ||
-      !!v.SALLA_OAUTH_TOKEN_URL ||
-      !!v.SALLA_API_BASE_URL ||
-      !!v.SALLA_OAUTH_REDIRECT_URI ||
-      !!v.SALLA_OAUTH_SCOPE ||
-      !!v.SALLA_VERIFY_ENDPOINT;
+    const mode = (v.SALLA_OAUTH_MODE ?? "easy") as "easy" | "custom";
 
-    if (!oauthEnabled) return;
-
-    const required: Array<[keyof typeof v, string]> = [
-      ["SALLA_CLIENT_ID", "SALLA_CLIENT_ID is required when OAuth is enabled"],
-      ["SALLA_CLIENT_SECRET", "SALLA_CLIENT_SECRET is required when OAuth is enabled"],
-      ["SALLA_OAUTH_AUTHORIZE_URL", "SALLA_OAUTH_AUTHORIZE_URL is required when OAuth is enabled"],
-      ["SALLA_OAUTH_TOKEN_URL", "SALLA_OAUTH_TOKEN_URL is required when OAuth is enabled"],
-      ["SALLA_API_BASE_URL", "SALLA_API_BASE_URL is required when OAuth is enabled"],
-    ];
-
-    for (const [k, msg] of required) {
-      if (!v[k]) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [k as string], message: msg });
+    if (mode === "easy") {
+      if (!v.SALLA_APP_ID) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["SALLA_APP_ID"],
+          message: "SALLA_APP_ID is required in easy mode",
+        });
       }
+      if (!v.SALLA_CLIENT_ID) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["SALLA_CLIENT_ID"],
+          message: "SALLA_CLIENT_ID is required to refresh tokens",
+        });
+      }
+      if (!v.SALLA_CLIENT_SECRET) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["SALLA_CLIENT_SECRET"],
+          message: "SALLA_CLIENT_SECRET is required to refresh tokens",
+        });
+      }
+      if (!v.SALLA_OAUTH_TOKEN_URL) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["SALLA_OAUTH_TOKEN_URL"],
+          message: "SALLA_OAUTH_TOKEN_URL is required to refresh tokens",
+        });
+      }
+      return;
     }
 
-    try {
-      // eslint-disable-next-line no-new
-      new URL(v.APP_BASE_URL);
-    } catch {
+    if (!v.SALLA_CLIENT_ID) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["APP_BASE_URL"],
-        message: "APP_BASE_URL must be a valid absolute URL (e.g., https://example.com) when OAuth is enabled",
+        code: "custom",
+        path: ["SALLA_CLIENT_ID"],
+        message: "SALLA_CLIENT_ID is required in custom mode",
+      });
+    }
+    if (!v.SALLA_CLIENT_SECRET) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["SALLA_CLIENT_SECRET"],
+        message: "SALLA_CLIENT_SECRET is required in custom mode",
+      });
+    }
+    if (!v.SALLA_OAUTH_AUTHORIZE_URL) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["SALLA_OAUTH_AUTHORIZE_URL"],
+        message: "SALLA_OAUTH_AUTHORIZE_URL is required in custom mode",
+      });
+    }
+    if (!v.SALLA_OAUTH_TOKEN_URL) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["SALLA_OAUTH_TOKEN_URL"],
+        message: "SALLA_OAUTH_TOKEN_URL is required in custom mode",
       });
     }
 
-    if (v.SALLA_VERIFY_ENDPOINT && !v.SALLA_VERIFY_ENDPOINT.startsWith("/")) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["SALLA_VERIFY_ENDPOINT"],
-        message: "SALLA_VERIFY_ENDPOINT should start with '/' (path appended to SALLA_API_BASE_URL)",
-      });
+    const hasOverride = !!(v.SALLA_OAUTH_REDIRECT_URI && v.SALLA_OAUTH_REDIRECT_URI.trim());
+    if (!hasOverride) {
+      const base = (v.APP_BASE_URL ?? "").trim();
+      if (!base) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["APP_BASE_URL"],
+          message: "APP_BASE_URL is required in custom mode (used to derive /auth/callback)",
+        });
+      }
     }
   });
 
 export const env = schema.parse(process.env);
-export type Env = typeof env;

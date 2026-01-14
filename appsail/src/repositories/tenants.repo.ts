@@ -1,5 +1,4 @@
 import { getCatalystApp } from "../lib/catalyst";
-import { toCatalystDateTime } from "../lib/datetime";
 
 function assertRowIdDigits(id: string | number) {
   const v = String(id ?? "").trim();
@@ -9,13 +8,24 @@ function assertRowIdDigits(id: string | number) {
 
 export type TenantRow = {
   ROWID: string;
+
+  // ✅ mandatory + unique in your Datastore schema
   salla_store_id: string;
+
+  // ✅ present in schema
   store_name: string;
   store_domain?: string | null;
   timezone?: string | null;
+
+  // ✅ mandatory in schema
   plan_code: string;
+
   flags_json?: string | null;
+
+  // ✅ mandatory in schema
   status: string;
+
+  // ✅ mandatory + unique in schema
   portal_public_slug: string;
 };
 
@@ -29,25 +39,40 @@ function pickAllowedSallaFields(patch: Record<string, any>) {
   return out;
 }
 
+function normalizeSlug(slug: string) {
+  return String(slug ?? "").trim().toLowerCase();
+}
+
+function makePendingStoreId(portal_public_slug: string) {
+  // NOTE: your schema has salla_store_id mandatory + unique.
+  // In easy mode, we may not know the real store_id at tenant creation time,
+  // so we insert a unique placeholder and overwrite later on authorize webhook.
+  const slug = String(portal_public_slug ?? "").trim() || "unknown";
+  const v = `pending-${slug}-${Date.now()}`;
+  // keep it safe for varchar limits (you can tweak 120 if your column is larger)
+  return v.length > 120 ? v.slice(0, 120) : v;
+}
+
 export class TenantsRepo {
   static tableName = "tenants";
 
   private static cache = new Map<string, { row: TenantRow; exp: number }>();
   private static CACHE_TTL_MS = 5 * 60 * 1000;
 
-  private static normalizeSlug(slug: string) {
-    return slug.trim().toLowerCase();
-  }
-
   private static normalizeRow(match: any): TenantRow {
     return {
       ROWID: String(match.ROWID),
+
       salla_store_id: String(match.salla_store_id ?? ""),
+
       store_name: String(match.store_name ?? ""),
       store_domain: match.store_domain ?? null,
       timezone: match.timezone ?? null,
+
       plan_code: String(match.plan_code ?? ""),
+
       flags_json: match.flags_json ?? null,
+
       status: String(match.status ?? ""),
       portal_public_slug: String(match.portal_public_slug ?? ""),
     };
@@ -65,7 +90,7 @@ export class TenantsRepo {
   }
 
   static async findByPortalSlug(req: any, slug: string): Promise<TenantRow | null> {
-    const key = this.normalizeSlug(slug);
+    const key = normalizeSlug(slug);
 
     const cached = this.cache.get(key);
     if (cached && cached.exp > Date.now()) return cached.row;
@@ -81,13 +106,42 @@ export class TenantsRepo {
       const resp = await table.getPagedRows({ nextToken, maxRows: 200 });
       const rows: any[] = resp?.data ?? [];
 
-      const match = rows.find((r) => this.normalizeSlug(String(r.portal_public_slug ?? "")) === key);
+      const match = rows.find((r) => normalizeSlug(String(r.portal_public_slug ?? "")) === key);
 
       if (match) {
         const row = this.normalizeRow(match);
         this.cache.set(key, { row, exp: Date.now() + this.CACHE_TTL_MS });
         return row;
       }
+
+      more = Boolean(resp?.more_records);
+      nextToken = resp?.next_token;
+
+      loops++;
+      if (loops > 50) break;
+    }
+
+    return null;
+  }
+
+  static async findBySallaStoreId(req: any, sallaStoreId: string | number): Promise<TenantRow | null> {
+    const target = String(sallaStoreId ?? "").trim();
+    if (!target) return null;
+
+    const app = getCatalystApp(req);
+    const table = app.datastore().table(this.tableName);
+
+    let nextToken: string | undefined = undefined;
+    let more = true;
+    let loops = 0;
+
+    while (more) {
+      const resp = await table.getPagedRows({ nextToken, maxRows: 200 });
+      const rows: any[] = resp?.data ?? [];
+
+      const match = rows.find((r) => String(r.salla_store_id ?? "").trim() === target);
+
+      if (match) return this.normalizeRow(match);
 
       more = Boolean(resp?.more_records);
       nextToken = resp?.next_token;
@@ -120,9 +174,19 @@ export class TenantsRepo {
     this.updateCacheByTenantId(tid, payload as any);
   }
 
+  /**
+   * ✅ Create tenant row matching your Datastore schema:
+   * Mandatory columns in your screenshot:
+   * - salla_store_id (varchar, mandatory, unique)
+   * - plan_code (varchar, mandatory)
+   * - status (varchar, mandatory)
+   * - portal_public_slug (varchar, mandatory, unique)
+   *
+   * NOTE: We DO NOT write created_at because Catalyst already has CREATEDTIME column.
+   */
   static async create(
     req: any,
-    args: { portal_public_slug: string; status?: string }
+    args: { portal_public_slug: string; status?: string; plan_code?: string }
   ): Promise<any> {
     const slug = String(args.portal_public_slug ?? "").trim();
     if (!slug) throw new Error("portal_public_slug is required");
@@ -130,14 +194,22 @@ export class TenantsRepo {
     const app = getCatalystApp(req);
     const table = app.datastore().table(this.tableName);
 
-    const now = toCatalystDateTime(new Date());
-
-    // Make sure these columns exist in your tenants table:
-    // portal_public_slug (string), status (string), created_at (datetime/string)
     const row: any = await table.insertRow({
       portal_public_slug: slug,
+
       status: args.status ?? "draft",
-      created_at: now,
+      plan_code: args.plan_code ?? "free",
+
+      // mandatory + unique (placeholder until authorize webhook overwrites it)
+      salla_store_id: makePendingStoreId(slug),
+
+      // schema has store_name (varchar) - safe default
+      store_name: "",
+
+      // optional
+      store_domain: null,
+      timezone: null,
+      flags_json: null,
     });
 
     return row;

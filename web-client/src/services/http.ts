@@ -1,3 +1,5 @@
+// web-client/src/services/http.ts
+
 export type ApiErrorShape = { code?: string; message?: string; details?: unknown };
 
 export class ApiError extends Error {
@@ -21,10 +23,17 @@ export function toErrorMessage(e: unknown) {
   }
 }
 
+/**
+ * ✅ FIX:
+ * 1) Prefer REACT_APP_API_BASE_URL when present.
+ * 2) If missing/empty in production builds, fall back to SAME-ORIGIN:
+ *    - If SPA is served from https://<appsail-domain>/app/..., base becomes https://<appsail-domain>
+ * 3) Always strip trailing slashes.
+ */
 function baseUrl() {
-  const v = (process.env.REACT_APP_API_BASE_URL || "").trim();
-  if (!v) return "";
-  return v.replace(/\/+$/, "");
+  const envBase = (process.env.REACT_APP_API_BASE_URL || "").trim();
+  const picked = envBase || (typeof window !== "undefined" ? window.location.origin : "");
+  return picked.replace(/\/+$/, "");
 }
 
 function join(path: string) {
@@ -33,7 +42,7 @@ function join(path: string) {
   // IMPORTANT: prevent relative calls from becoming /app/xyz when the SPA runs under /app/*
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
 
-  if (!b) return normalizedPath;
+  // If base URL exists, always use absolute base + path
   return `${b}${normalizedPath}`;
 }
 

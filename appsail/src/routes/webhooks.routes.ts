@@ -28,11 +28,17 @@ webhooksRoutes.post("/salla", async (req: any, res, next) => {
     }
 
     const body = req.body ?? {};
-    const eventType = String(body.type ?? body.event ?? body.action ?? "unknown");
+    const eventType = String(body.event ?? body.type ?? body.action ?? "unknown").trim();
     const storeId = extractStoreId(body);
+    const portalSlug = extractPortalSlug(body);
     const receivedAt = toCatalystDateTime(new Date());
 
-    const tenantId = storeId ? await resolveTenantIdBySallaStoreId(req, storeId) : null;
+    let tenant: any = null;
+
+    if (storeId) tenant = await TenantsRepo.findBySallaStoreId(req, storeId).catch(() => null);
+    if (!tenant && portalSlug) tenant = await TenantsRepo.findByPortalSlug(req, portalSlug).catch(() => null);
+
+    const tenantId = tenant ? String(tenant.ROWID) : null;
 
     const externalId = extractExternalEventId(body);
     const fallbackId = sha1Hex(rawBody);
@@ -52,14 +58,15 @@ webhooksRoutes.post("/salla", async (req: any, res, next) => {
       retry_count: 0,
     });
 
-    if (tenantId) {
-      await handleSallaWebhook(req, tenantId, body);
-    } else if (storeId) {
-      logger.error({
-        code: "WEBHOOK_TENANT_NOT_FOUND",
-        msg: "Webhook received but tenant could not be resolved by store_id",
-        store_id: storeId,
+    const result = await handleSallaWebhook(req, tenantId, body);
+
+    if (!tenantId) {
+      logger.warn({
+        code: "WEBHOOK_TENANT_NOT_RESOLVED",
         event_type: eventType,
+        store_id: storeId ?? null,
+        portal_public_slug: portalSlug ?? null,
+        handled: result?.handled ?? null,
       });
     }
 
@@ -126,8 +133,10 @@ function decodeSignatureToBuffer(sig: string): Buffer | null {
 
 function extractStoreId(body: any): string | null {
   const direct =
+    body?.merchant ??
     body?.store_id ??
     body?.storeId ??
+    body?.data?.merchant ??
     body?.data?.store_id ??
     body?.data?.storeId ??
     body?.data?.store?.id ??
@@ -138,31 +147,23 @@ function extractStoreId(body: any): string | null {
   return s ? s : null;
 }
 
-function extractExternalEventId(body: any): string | null {
-  const v = body?.id ?? body?.event_id ?? body?.data?.id ?? body?.data?.event_id;
+function extractPortalSlug(body: any): string | null {
+  const v =
+    body?.portal_public_slug ??
+    body?.data?.portal_public_slug ??
+    body?.meta?.portal_public_slug ??
+    body?.data?.meta?.portal_public_slug;
+
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
   return s ? s : null;
 }
 
-async function resolveTenantIdBySallaStoreId(req: any, storeId: string): Promise<string | null> {
-  const app = getCatalystApp(req);
-  const table = app.datastore().table(TenantsRepo.tableName);
-
-  let nextToken: string | undefined = undefined;
-
-  for (let loops = 0; loops < 50; loops++) {
-    const resp = await table.getPagedRows({ nextToken, maxRows: 200 });
-    const rows: any[] = resp?.data ?? [];
-
-    const match = rows.find((r) => String(r.salla_store_id ?? "") === String(storeId));
-    if (match) return String(match.ROWID);
-
-    nextToken = resp?.next_token;
-    if (!resp?.more_records && !nextToken) break;
-  }
-
-  return null;
+function extractExternalEventId(body: any): string | null {
+  const v = body?.id ?? body?.event_id ?? body?.data?.id ?? body?.data?.event_id;
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  return s ? s : null;
 }
 
 async function insertWebhookEvent(req: any, payload: Record<string, any>): Promise<void> {

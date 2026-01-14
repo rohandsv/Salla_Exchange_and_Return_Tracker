@@ -1,3 +1,4 @@
+// web-client/src/pages/merchant/MerchantHome.tsx
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, Link, useSearchParams } from "react-router-dom";
 import Card from "../../components/ui/Card";
@@ -51,19 +52,16 @@ export default function MerchantHome() {
     }
   }, [slug, toast]);
 
+  /**
+   * ✅ FIXED:
+   * merchantOAuthStartRedirect() ALREADY redirects the browser.
+   * It returns void, so we must not expect {url} here or do a second redirect.
+   */
   const connect = useCallback(async () => {
     if (!slug) return;
     try {
-      const res: any = await merchantOAuthStartRedirect(slug);
-      if (res && typeof res.url === "string") {
-        window.location.href = res.url;
-      } else {
-        toast.push({
-          title: "OAuth started",
-          message: "Follow the instructions to complete the connection.",
-          tone: "neutral",
-        });
-      }
+      await merchantOAuthStartRedirect(slug);
+      // no toast here usually — browser will navigate away immediately
     } catch (e) {
       toast.push({
         title: "Unable to start OAuth",
@@ -84,7 +82,15 @@ export default function MerchantHome() {
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          gap: 14,
+          flexWrap: "wrap",
+          alignItems: "flex-end",
+        }}
+      >
         <div>
           <div className="h2" style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             Merchant Hub{" "}
@@ -100,17 +106,29 @@ export default function MerchantHome() {
           <Button variant="outline" onClick={refresh} disabled={loading || !slug}>
             Refresh
           </Button>
+
           <Button variant="primary" onClick={connect} disabled={!slug}>
             Connect Salla
           </Button>
+
           <Link to={slug ? `/p/${slug}` : "/"}>
-            <Button variant="outline" disabled={!slug}>Portal</Button>
+            <Button variant="outline" disabled={!slug}>
+              Portal
+            </Button>
           </Link>
         </div>
       </div>
 
       <Card style={{ padding: 14 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {[
               { k: "inbox", t: "Inbox" },
@@ -135,8 +153,6 @@ export default function MerchantHome() {
           <Badge tone="neutral">BRD-3 MVP</Badge>
         </div>
       </Card>
-
-      {/* ... rest of your component unchanged ... */}
 
       {tab === "inbox" ? (
         <Card style={{ padding: 16 }}>
@@ -207,6 +223,7 @@ export default function MerchantHome() {
             <Input label="Return eligibility window (days)" placeholder="e.g. 14" />
             <Input label="Category restrictions (comma separated)" placeholder="e.g. electronics, beauty" />
             <Input label="Auto-approve threshold (amount or criteria)" placeholder="e.g. under 200 SAR" />
+
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               <Button variant="primary" disabled>
                 Save rules
@@ -215,6 +232,7 @@ export default function MerchantHome() {
                 Back to Inbox
               </Button>
             </div>
+
             <div style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.6 }}>
               BRD-3 requires configurable rules (return window, category restrictions, auto-approve/manual). This UI is
               ready; wire it to your rules endpoints when available.
