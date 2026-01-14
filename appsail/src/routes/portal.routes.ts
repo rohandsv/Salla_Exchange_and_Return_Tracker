@@ -25,6 +25,7 @@ portalRoutes.get("/", (_req, res) => {
       "POST /portal/returns",
       "GET  /portal/returns",
       "GET  /portal/returns/:return_number",
+      "POST /portal/returns/:return_number/cancel",
     ],
   });
 });
@@ -162,6 +163,29 @@ portalRoutes.get("/returns/:return_number", authPortal, async (req: any, res, ne
 
     const result = await ReturnsService.getPortalReturnDetails(req, {
       returnNumber: params.return_number,
+    });
+
+    res.json(result);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * 7) Customer cancel a return request (protected)
+ * Only allowed when return is still in "requested" status.
+ */
+portalRoutes.post("/returns/:return_number/cancel", authPortal, async (req: any, res, next) => {
+  try {
+    const params = returnNumberParamSchema.parse(req.params);
+
+    const body = (req.body ?? {}) as any;
+    const cancelReason =
+      body?.reason == null || String(body.reason).trim() === "" ? undefined : String(body.reason).trim();
+
+    const result = await ReturnsService.cancelPortalReturn(req, {
+      returnNumber: params.return_number,
+      reason: cancelReason,
     });
 
     res.json(result);

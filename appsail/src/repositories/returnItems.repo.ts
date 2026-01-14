@@ -1,3 +1,4 @@
+// appsail/src/repositories/returnItems.repo.ts
 import { getCatalystApp } from "../lib/catalyst";
 
 function assertRowIdDigits(id: string | number) {
@@ -56,6 +57,56 @@ export class ReturnItemsRepo {
   }
 
   /**
+   * ✅ Safe row fetch by ROWID (datastore API, not ZCQL).
+   */
+  static async findById(req: any, rowId: string | number): Promise<ReturnItemRow | null> {
+    const app = getCatalystApp(req);
+    const rid = assertRowIdDigits(rowId);
+
+    const table = app.datastore().table(this.tableName);
+    const row = await table.getRow(rid as any).catch(() => null);
+    if (!row) return null;
+
+    return {
+      ...(row as any),
+      ROWID: String((row as any).ROWID),
+      tenant_id: String((row as any).tenant_id ?? ""),
+      return_request_id: String((row as any).return_request_id ?? ""),
+    } as ReturnItemRow;
+  }
+
+  /**
+   * ✅ Update row by ROWID (datastore API)
+   */
+  static async update(req: any, row: Record<string, any> & { ROWID: string | number }) {
+    const app = getCatalystApp(req);
+
+    const payload: any = { ...row };
+    payload.ROWID = assertRowIdDigits(payload.ROWID);
+
+    if (payload.tenant_id != null) payload.tenant_id = assertRowIdDigits(payload.tenant_id);
+    if (payload.return_request_id != null) payload.return_request_id = assertRowIdDigits(payload.return_request_id);
+
+    return app.datastore().table(this.tableName).updateRow(payload);
+  }
+
+  static async bulkUpdate(req: any, rows: Array<Record<string, any> & { ROWID: string | number }>, concurrency = 5) {
+    const results: any[] = [];
+    const queue = [...rows];
+
+    const workers = new Array(Math.max(1, concurrency)).fill(0).map(async () => {
+      while (queue.length) {
+        const row = queue.shift();
+        if (!row) break;
+        results.push(await this.update(req, row));
+      }
+    });
+
+    await Promise.all(workers);
+    return results;
+  }
+
+  /**
    * IMPORTANT: No ZCQL here to avoid BigInt/FK comparison internal errors.
    */
   static async listByReturnRequestId(
@@ -98,8 +149,8 @@ export class ReturnItemsRepo {
 
     // Createdtime ordering (oldest first) to match earlier behavior
     out.sort((a: any, b: any) => {
-      const ta = Date.parse(a.CREATEDTIME || a.created_time || "") || 0;
-      const tb = Date.parse(b.CREATEDTIME || b.created_time || "") || 0;
+      const ta = Date.parse((a as any).CREATEDTIME || (a as any).created_time || "") || 0;
+      const tb = Date.parse((b as any).CREATEDTIME || (b as any).created_time || "") || 0;
       return ta - tb;
     });
 

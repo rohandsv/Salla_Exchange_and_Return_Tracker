@@ -13,6 +13,7 @@ import {
 } from "../lib/tenantResolve";
 import { ReturnRequestsRepo } from "../repositories/returnRequests.repo";
 import { ReturnItemsRepo } from "../repositories/returnItems.repo";
+import { MerchantReturnsService } from "../services/merchantReturns.service";
 
 export const merchantRoutes = Router();
 
@@ -25,8 +26,17 @@ merchantRoutes.get("/", (_req, res) => {
       "GET  /merchant/oauth/start?portal_public_slug=...",
 
       "GET  /merchant/:tenantSlug/kpis",
+
       "GET  /merchant/:tenantSlug/returns",
       "GET  /merchant/:tenantSlug/returns/:return_number",
+
+      // ✅ NEW actions
+      "POST /merchant/:tenantSlug/returns/:return_number/items",
+      "POST /merchant/:tenantSlug/returns/:return_number/approve",
+      "POST /merchant/:tenantSlug/returns/:return_number/reject",
+      "POST /merchant/:tenantSlug/returns/:return_number/received",
+      "POST /merchant/:tenantSlug/returns/:return_number/resolve",
+
       "GET  /merchant/:tenantSlug/rules",
       "PUT  /merchant/:tenantSlug/rules",
       "GET  /merchant/:tenantSlug/settings",
@@ -294,12 +304,6 @@ merchantRoutes.get("/:tenantSlug/kpis", authMerchant, async (req: any, res, next
   }
 });
 
-/**
- * ✅ Merchant returns inbox (DB-backed)
- * Query params:
- * - status (optional)
- * - limit  (optional, max 200)
- */
 merchantRoutes.get("/:tenantSlug/returns", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
@@ -346,9 +350,6 @@ merchantRoutes.get("/:tenantSlug/returns", authMerchant, async (req: any, res, n
   }
 });
 
-/**
- * ✅ Merchant return detail (DB-backed)
- */
 merchantRoutes.get("/:tenantSlug/returns/:return_number", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
@@ -408,6 +409,171 @@ merchantRoutes.get("/:tenantSlug/returns/:return_number", authMerchant, async (r
   }
 });
 
+/**
+ * ----------------------------
+ * ✅ NEW merchant action routes
+ * ----------------------------
+ */
+
+merchantRoutes.post("/:tenantSlug/returns/:return_number/items", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
+
+    const body = z
+      .object({
+        items: z
+          .array(
+            z.object({
+              return_item_id: z.string().min(1),
+              decision: z.string().min(1),
+              decision_reason: z.string().optional(),
+            })
+          )
+          .min(1),
+      })
+      .parse(req.body ?? {});
+
+    const { rr, items } = await MerchantReturnsService.setItemDecisions(
+      req,
+      tenant.ROWID,
+      params.return_number,
+      body.items.map((it) => ({
+        return_item_id: it.return_item_id,
+        decision: it.decision,
+        decision_reason: it.decision_reason,
+      }))
+    );
+
+    return res.json({ ok: true, return_request_id: rr.ROWID, return_number: rr.return_number, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.post("/:tenantSlug/returns/:return_number/approve", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
+
+    const body = z
+      .object({
+        status_reason: z.string().optional(),
+        notes_internal: z.string().optional(),
+        items: z
+          .array(
+            z.object({
+              return_item_id: z.string().min(1),
+              decision: z.string().min(1),
+              decision_reason: z.string().optional(),
+            })
+          )
+          .optional(),
+      })
+      .parse(req.body ?? {});
+
+    const { rr, items } = await MerchantReturnsService.approve(req, tenant.ROWID, params.return_number, {
+      status_reason: body.status_reason,
+      notes_internal: body.notes_internal,
+      items: body.items?.map((it) => ({
+        return_item_id: it.return_item_id,
+        decision: it.decision,
+        decision_reason: it.decision_reason,
+      })),
+    });
+
+    return res.json({ ok: true, return_request_id: rr.ROWID, return_number: rr.return_number, status: "approved", items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.post("/:tenantSlug/returns/:return_number/reject", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
+
+    const body = z
+      .object({
+        status_reason: z.string().optional(),
+        notes_internal: z.string().optional(),
+      })
+      .parse(req.body ?? {});
+
+    const { rr } = await MerchantReturnsService.reject(req, tenant.ROWID, params.return_number, body);
+
+    return res.json({
+      ok: true,
+      return_request_id: rr.ROWID,
+      return_number: rr.return_number,
+      status: "rejected",
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.post("/:tenantSlug/returns/:return_number/received", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
+
+    const body = z
+      .object({
+        status_reason: z.string().optional(),
+        notes_internal: z.string().optional(),
+      })
+      .parse(req.body ?? {});
+
+    const { rr } = await MerchantReturnsService.markReceived(req, tenant.ROWID, params.return_number, body);
+
+    return res.json({
+      ok: true,
+      return_request_id: rr.ROWID,
+      return_number: rr.return_number,
+      status: "received",
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.post("/:tenantSlug/returns/:return_number/resolve", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
+
+    const body = z
+      .object({
+        type: z.enum(["refund", "exchange", "store_credit"]),
+        refund_transaction_id_external: z.string().optional(),
+        exchange_order_id_external: z.string().optional(),
+        store_credit_ref_external: z.string().optional(),
+        status_reason: z.string().optional(),
+        notes_internal: z.string().optional(),
+      })
+      .parse(req.body ?? {});
+
+    const { rr } = await MerchantReturnsService.resolve(req, tenant.ROWID, params.return_number, body);
+
+    return res.json({
+      ok: true,
+      return_request_id: rr.ROWID,
+      return_number: rr.return_number,
+      status: "resolved",
+      resolution_type: body.type,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * -----------------------
+ * Rules / Settings (kept)
+ * -----------------------
+ */
+
 merchantRoutes.get("/:tenantSlug/rules", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
@@ -432,9 +598,7 @@ merchantRoutes.put("/:tenantSlug/rules", authMerchant, async (req: any, res, nex
     const body = rulesSchema.parse(req.body ?? {});
 
     const merged = await TenantsRepo.mergeFlagsObject(req, tenant.ROWID, {
-      merchant: {
-        rules: body,
-      },
+      merchant: { rules: body },
     });
 
     res.json({
@@ -471,9 +635,7 @@ merchantRoutes.put("/:tenantSlug/settings", authMerchant, async (req: any, res, 
     const body = settingsSchema.parse(req.body ?? {});
 
     const merged = await TenantsRepo.mergeFlagsObject(req, tenant.ROWID, {
-      merchant: {
-        settings: body,
-      },
+      merchant: { settings: body },
     });
 
     res.json({
