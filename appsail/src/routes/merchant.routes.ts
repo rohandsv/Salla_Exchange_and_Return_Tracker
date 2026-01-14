@@ -11,12 +11,11 @@ import {
   resolveTenantByPortalSlug,
   resolveTenantFromRouteParam,
 } from "../lib/tenantResolve";
+import { ReturnRequestsRepo } from "../repositories/returnRequests.repo";
+import { ReturnItemsRepo } from "../repositories/returnItems.repo";
 
 export const merchantRoutes = Router();
 
-/**
- * Base route (so /merchant doesn't 404)
- */
 merchantRoutes.get("/", (_req, res) => {
   res.json({
     ok: true,
@@ -27,6 +26,7 @@ merchantRoutes.get("/", (_req, res) => {
 
       "GET  /merchant/:tenantSlug/kpis",
       "GET  /merchant/:tenantSlug/returns",
+      "GET  /merchant/:tenantSlug/returns/:return_number",
       "GET  /merchant/:tenantSlug/rules",
       "PUT  /merchant/:tenantSlug/rules",
       "GET  /merchant/:tenantSlug/settings",
@@ -56,7 +56,6 @@ merchantRoutes.post("/tenants", async (req: any, res, next) => {
     if (!tenant) {
       await TenantsRepo.create(req, { portal_public_slug: slug, status: "draft" });
       tenant = await TenantsRepo.findByPortalSlug(req, slug);
-
       if (!tenant) {
         throw new AppError(500, "Tenant created but could not be loaded", "TENANT_CREATE_FAILED");
       }
@@ -185,13 +184,8 @@ merchantRoutes.get("/oauth/status", async (req: any, res, next) => {
 
 /**
  * -----------------------------------------
- * Tenant-aware Merchant API (NEW CONTRACT)
+ * Tenant-aware Merchant API
  * -----------------------------------------
- * /merchant/:tenantSlug/*
- *
- * Uses authMerchant:
- * - validates debug key (if enabled)
- * - resolves tenant and sets req.tenantId + req.tenant
  */
 
 const kpisResponseSchema = z.object({
@@ -206,7 +200,6 @@ const kpisResponseSchema = z.object({
     credit_issued_sar: z.number(),
   }),
 });
-
 type MerchantKpis = z.infer<typeof kpisResponseSchema>;
 
 function defaultKpis(): MerchantKpis {
@@ -240,7 +233,6 @@ const rulesSchema = z.object({
     )
     .default([]),
 });
-
 type MerchantRules = z.infer<typeof rulesSchema>;
 
 function defaultRules(): MerchantRules {
@@ -263,13 +255,11 @@ const settingsSchema = z.object({
     .default({ primary_color: "#4f46e5" }),
   portal: z
     .object({
-      // future safe place to control portal behavior/strings
       support_email: z.string().email().optional(),
       policy_url: z.string().url().optional(),
     })
     .default({}),
 });
-
 type MerchantSettings = z.infer<typeof settingsSchema>;
 
 function readNested<T>(obj: any, path: string[]): T | undefined {
@@ -283,7 +273,6 @@ function readNested<T>(obj: any, path: string[]): T | undefined {
 
 merchantRoutes.get("/:tenantSlug/kpis", authMerchant, async (req: any, res, next) => {
   try {
-    // Ensure tenant is consistent (authMerchant already resolved)
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
     const flags = await TenantsRepo.getFlagsObject(req, tenant.ROWID);
 
@@ -305,20 +294,114 @@ merchantRoutes.get("/:tenantSlug/kpis", authMerchant, async (req: any, res, next
   }
 });
 
+/**
+ * ✅ Merchant returns inbox (DB-backed)
+ * Query params:
+ * - status (optional)
+ * - limit  (optional, max 200)
+ */
 merchantRoutes.get("/:tenantSlug/returns", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
 
-    // NOTE: Once you paste returnRequests.repo / returns.service for merchant,
-    // we will replace this with real DB-backed data without changing response shape.
+    const qs = z
+      .object({
+        status: z.string().optional(),
+        limit: z
+          .string()
+          .optional()
+          .transform((v) => (v == null || v.trim() === "" ? undefined : Number(v))),
+      })
+      .parse(req.query);
+
+    const rows = await ReturnRequestsRepo.listByTenant(req, tenant.ROWID, {
+      status: qs.status ? String(qs.status).trim() : undefined,
+      limit: typeof qs.limit === "number" && Number.isFinite(qs.limit) ? qs.limit : 200,
+    });
+
     res.json({
       ok: true,
       tenant: {
         tenant_id: tenant.ROWID,
         portal_public_slug: tenant.portal_public_slug,
       },
-      items: [],
+      items: rows.map((r) => ({
+        return_request_id: r.ROWID,
+        return_number: r.return_number,
+        order_number: r.order_number,
+        order_id_external: r.order_id_external ?? null,
+        requested_resolution: r.requested_resolution,
+        status: r.status,
+        status_reason: r.status_reason ?? null,
+        requested_at: r.requested_at,
+        resolved_at: r.resolved_at ?? null,
+        total_items_count: Number(r.total_items_count ?? 0),
+        total_request_value: r.total_request_value == null ? null : Number(r.total_request_value),
+        is_warranty: Boolean(r.is_warranty),
+      })),
       page: { next_cursor: null },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * ✅ Merchant return detail (DB-backed)
+ */
+merchantRoutes.get("/:tenantSlug/returns/:return_number", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+
+    const params = z
+      .object({
+        return_number: z.string().min(1),
+      })
+      .parse(req.params);
+
+    const rr = await ReturnRequestsRepo.findByReturnNumber(req, tenant.ROWID, params.return_number);
+    if (!rr) throw new AppError(404, "Return not found", "RETURN_NOT_FOUND");
+
+    const items = await ReturnItemsRepo.listByReturnRequestId(req, tenant.ROWID, rr.ROWID);
+
+    res.json({
+      ok: true,
+      tenant: { tenant_id: tenant.ROWID, portal_public_slug: tenant.portal_public_slug },
+      return: {
+        return_request_id: rr.ROWID,
+        return_number: rr.return_number,
+        order_number: rr.order_number,
+        order_id_external: rr.order_id_external ?? null,
+
+        requested_resolution: rr.requested_resolution,
+        status: rr.status,
+        status_reason: rr.status_reason ?? null,
+
+        requested_at: rr.requested_at,
+        approved_at: rr.approved_at ?? null,
+        received_at: rr.received_at ?? null,
+        resolved_at: rr.resolved_at ?? null,
+
+        notes_customer: rr.notes_customer ?? null,
+        notes_internal: rr.notes_internal ?? null,
+
+        total_items_count: Number(rr.total_items_count ?? 0),
+        total_request_value: rr.total_request_value == null ? null : Number(rr.total_request_value),
+        is_warranty: Boolean(rr.is_warranty),
+
+        items: items.map((it) => ({
+          return_item_id: it.ROWID,
+          sku: it.sku,
+          product_name: it.product_name ?? null,
+          variant_name: it.variant_name ?? null,
+          quantity: Number((it as any).quantity ?? 0),
+          unit_price: (it as any).unit_price == null ? null : Number((it as any).unit_price),
+          reason_code: it.reason_code,
+          reason_note: it.reason_note ?? null,
+          decision: it.decision,
+          decision_reason: it.decision_reason ?? null,
+        })),
+      },
     });
   } catch (e) {
     next(e);
@@ -346,14 +429,10 @@ merchantRoutes.get("/:tenantSlug/rules", authMerchant, async (req: any, res, nex
 merchantRoutes.put("/:tenantSlug/rules", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
-
     const body = rulesSchema.parse(req.body ?? {});
+
     const merged = await TenantsRepo.mergeFlagsObject(req, tenant.ROWID, {
       merchant: {
-        ...(await (async () => {
-          const current = await TenantsRepo.getFlagsObject(req, tenant.ROWID);
-          return (current as any).merchant ?? {};
-        })()),
         rules: body,
       },
     });
@@ -389,14 +468,10 @@ merchantRoutes.get("/:tenantSlug/settings", authMerchant, async (req: any, res, 
 merchantRoutes.put("/:tenantSlug/settings", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
-
     const body = settingsSchema.parse(req.body ?? {});
+
     const merged = await TenantsRepo.mergeFlagsObject(req, tenant.ROWID, {
       merchant: {
-        ...(await (async () => {
-          const current = await TenantsRepo.getFlagsObject(req, tenant.ROWID);
-          return (current as any).merchant ?? {};
-        })()),
         settings: body,
       },
     });

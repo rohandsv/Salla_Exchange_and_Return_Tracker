@@ -50,15 +50,42 @@ function makePendingStoreId(portal_public_slug: string) {
   return v.length > 120 ? v.slice(0, 120) : v;
 }
 
-function safeParseJsonObject(input: string | null | undefined): Record<string, any> {
-  if (!input) return {};
+function safeJsonParse(input: any): any {
+  if (input == null) return null;
+  if (typeof input === "object") return input;
+  const s = String(input ?? "").trim();
+  if (!s) return null;
   try {
-    const v = JSON.parse(String(input));
-    if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, any>;
-    return {};
+    return JSON.parse(s);
   } catch {
-    return {};
+    return null;
   }
+}
+
+function safeJsonStringify(input: any): string | null {
+  if (input == null) return null;
+  try {
+    return JSON.stringify(input);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deep merge (plain objects only)
+ */
+function deepMerge(target: any, patch: any): any {
+  if (!patch || typeof patch !== "object") return target;
+  const out = Array.isArray(target) ? [...target] : { ...(target ?? {}) };
+
+  for (const [k, v] of Object.entries(patch)) {
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      out[k] = deepMerge(out[k], v);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
 }
 
 export class TenantsRepo {
@@ -182,80 +209,6 @@ export class TenantsRepo {
     this.updateCacheByTenantId(tid, payload as any);
   }
 
-  /**
-   * ✅ Fetch flags_json as an object
-   */
-  static async getFlagsObject(req: any, tenantId: string | number): Promise<Record<string, any>> {
-    const tid = assertRowIdDigits(tenantId);
-
-    // best-effort: reuse cache if possible
-    for (const cached of this.cache.values()) {
-      if (cached.exp > Date.now() && cached.row.ROWID === tid) {
-        return safeParseJsonObject(cached.row.flags_json);
-      }
-    }
-
-    // fallback: scan via findByPortalSlug is not possible without slug
-    // so do a small paged search for ROWID match
-    const app = getCatalystApp(req);
-    const table = app.datastore().table(this.tableName);
-
-    let nextToken: string | undefined = undefined;
-    let more = true;
-    let loops = 0;
-
-    while (more) {
-      const resp = await table.getPagedRows({ nextToken, maxRows: 200 });
-      const rows: any[] = resp?.data ?? [];
-      const match = rows.find((r) => String(r.ROWID) === tid);
-
-      if (match) {
-        const row = this.normalizeRow(match);
-        // update cache if we can infer slug key
-        const slugKey = normalizeSlug(row.portal_public_slug);
-        if (slugKey) this.cache.set(slugKey, { row, exp: Date.now() + this.CACHE_TTL_MS });
-        return safeParseJsonObject(row.flags_json);
-      }
-
-      more = Boolean(resp?.more_records);
-      nextToken = resp?.next_token;
-
-      loops++;
-      if (loops > 50) break;
-    }
-
-    return {};
-  }
-
-  /**
-   * ✅ Merge-patch flags_json (safe, no overwrite blast radius)
-   */
-  static async mergeFlagsObject(
-    req: any,
-    tenantId: string | number,
-    patch: Record<string, any>
-  ): Promise<Record<string, any>> {
-    const tid = assertRowIdDigits(tenantId);
-
-    const current = await this.getFlagsObject(req, tid);
-    const merged = { ...current, ...patch };
-
-    const app = getCatalystApp(req);
-    const table = app.datastore().table(this.tableName);
-
-    await table.updateRow({
-      ROWID: tid,
-      flags_json: JSON.stringify(merged),
-    });
-
-    this.updateCacheByTenantId(tid, { flags_json: JSON.stringify(merged) });
-
-    return merged;
-  }
-
-  /**
-   * ✅ Create tenant row matching your Datastore schema
-   */
   static async create(
     req: any,
     args: { portal_public_slug: string; status?: string; plan_code?: string }
@@ -272,14 +225,57 @@ export class TenantsRepo {
       status: args.status ?? "draft",
       plan_code: args.plan_code ?? "free",
 
+      // mandatory + unique (placeholder until authorize webhook overwrites it)
       salla_store_id: makePendingStoreId(slug),
 
+      // schema has store_name (varchar) - safe default
       store_name: "",
+
+      // optional
       store_domain: null,
       timezone: null,
       flags_json: null,
     });
 
     return row;
+  }
+
+  /**
+   * ✅ Used by Merchant routes to read tenant configuration safely.
+   */
+  static async getFlagsObject(req: any, tenantId: string | number): Promise<Record<string, any>> {
+    const app = getCatalystApp(req);
+    const table = app.datastore().table(this.tableName);
+
+    const tid = assertRowIdDigits(tenantId);
+
+    // safest: use getRow
+    const row = await table.getRow(tid as any);
+    const flags = safeJsonParse((row as any)?.flags_json);
+    return flags && typeof flags === "object" && !Array.isArray(flags) ? flags : {};
+  }
+
+  /**
+   * ✅ Deep-merge patch into flags_json and persist.
+   * Returns the merged object.
+   */
+  static async mergeFlagsObject(req: any, tenantId: string | number, patch: Record<string, any>) {
+    const app = getCatalystApp(req);
+    const table = app.datastore().table(this.tableName);
+
+    const tid = assertRowIdDigits(tenantId);
+
+    const current = await this.getFlagsObject(req, tid);
+    const merged = deepMerge(current, patch);
+
+    await table.updateRow({
+      ROWID: tid,
+      flags_json: safeJsonStringify(merged),
+    });
+
+    // cache refresh (only if this tenant is cached)
+    this.updateCacheByTenantId(tid, { flags_json: safeJsonStringify(merged) } as any);
+
+    return merged;
   }
 }

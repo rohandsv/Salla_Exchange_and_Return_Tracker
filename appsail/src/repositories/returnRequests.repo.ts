@@ -1,3 +1,4 @@
+// appsail/src/repositories/returnRequests.repo.ts
 import { getCatalystApp } from "../lib/catalyst";
 
 function q(value: string) {
@@ -117,6 +118,43 @@ export class ReturnRequestsRepo {
         AND order_number = ${q(orderNumber)}
       ORDER BY CREATEDTIME DESC
       LIMIT 200
+    `;
+
+    const res = await app.zcql().executeZCQLQuery(query);
+    if (!res || res.length === 0) return [];
+
+    return res.map((r: any) => {
+      const row = r[this.tableName] as any;
+      row.ROWID = String(row.ROWID);
+      row.tenant_id = String(row.tenant_id);
+      return row as ReturnRequestRow;
+    });
+  }
+
+  /**
+   * ✅ Merchant inbox listing: all returns for tenant (optionally filtered by status).
+   * No pagination guessing — returns up to `limit` (max 200).
+   */
+  static async listByTenant(
+    req: any,
+    tenantId: string | number,
+    args?: { status?: string; limit?: number }
+  ): Promise<ReturnRequestRow[]> {
+    const app = getCatalystApp(req);
+    const tid = assertRowIdDigits(tenantId);
+
+    const limit = Math.max(1, Math.min(200, Number(args?.limit ?? 200)));
+
+    const whereParts: string[] = [`tenant_id = ${tid}`];
+
+    const status = String(args?.status ?? "").trim();
+    if (status) whereParts.push(`status = ${q(status)}`);
+
+    const query = `
+      SELECT * FROM ${this.tableName}
+      WHERE ${whereParts.join(" AND ")}
+      ORDER BY CREATEDTIME DESC
+      LIMIT ${limit}
     `;
 
     const res = await app.zcql().executeZCQLQuery(query);
