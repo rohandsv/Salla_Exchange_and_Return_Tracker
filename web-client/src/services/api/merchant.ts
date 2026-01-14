@@ -1,46 +1,45 @@
-import { apiFetch } from "../http";
+import type { MerchantInboxItem, MerchantKpis, MerchantRules, MerchantSettings } from "../../domain/merchant";
+import { httpJson } from "../http/client";
+import { mockInbox, mockKpis, mockRules, mockSettings } from "./mocks";
 
-export type MerchantOAuthStatusRes = {
-  connected: boolean;
-  store_name?: string;
-  store_domain?: string;
-};
+const USE_MOCKS = (process.env.REACT_APP_USE_MOCKS || "true") === "true";
 
-type MerchantOAuthStatusApiRes = {
-  ok: true;
-  connected: boolean;
-  tenant?: {
-    store_name?: string | null;
-    store_domain?: string | null;
-  };
-};
+/**
+ * IMPORTANT:
+ * Your backend (or mock) is NOT serving /merchant/:tenant/kpis.
+ * So ALWAYS call the non-tenant endpoints.
+ */
+const KPIS_URL = "/merchant/kpis";
+const RETURNS_URL = "/merchant/returns";
+const RULES_URL = "/merchant/rules";
+const SETTINGS_URL = "/merchant/settings";
 
-type MerchantOAuthStartApiRes = {
-  ok: true;
-  url: string;
-  state_expires_at?: string;
-};
-
-export async function merchantOAuthStatus(portal_public_slug: string): Promise<MerchantOAuthStatusRes> {
-  const res = await apiFetch<MerchantOAuthStatusApiRes>(
-    `/merchant/oauth/status?portal_public_slug=${encodeURIComponent(portal_public_slug)}`
-  );
-
-  return {
-    connected: !!res.connected,
-    store_name: res.tenant?.store_name ?? undefined,
-    store_domain: res.tenant?.store_domain ?? undefined,
-  };
+export async function getMerchantKpis(): Promise<MerchantKpis> {
+  if (USE_MOCKS) return mockKpis;
+  return httpJson<MerchantKpis>(KPIS_URL);
 }
 
-export async function merchantOAuthStart(portal_public_slug: string): Promise<MerchantOAuthStartApiRes> {
-  return apiFetch<MerchantOAuthStartApiRes>(
-    `/merchant/oauth/start?portal_public_slug=${encodeURIComponent(portal_public_slug)}&mode=json`
-  );
+export async function getMerchantInbox(): Promise<MerchantInboxItem[]> {
+  if (USE_MOCKS) return mockInbox;
+  return httpJson<MerchantInboxItem[]>(RETURNS_URL);
 }
 
-export async function merchantOAuthStartRedirect(portal_public_slug: string) {
-  const res = await merchantOAuthStart(portal_public_slug);
-  if (!res?.url) throw new Error("Start did not return a URL");
-  window.location.assign(res.url);
+export async function getMerchantRules(): Promise<MerchantRules> {
+  if (USE_MOCKS) return mockRules;
+  return httpJson<MerchantRules>(RULES_URL);
+}
+
+export async function saveMerchantRules(next: MerchantRules): Promise<{ ok: true }> {
+  if (USE_MOCKS) return { ok: true };
+  return httpJson<{ ok: true }>(RULES_URL, { method: "POST", body: JSON.stringify(next) });
+}
+
+export async function getMerchantSettings(): Promise<MerchantSettings> {
+  if (USE_MOCKS) return mockSettings;
+  return httpJson<MerchantSettings>(SETTINGS_URL);
+}
+
+export async function saveMerchantSettings(next: MerchantSettings): Promise<{ ok: true }> {
+  if (USE_MOCKS) return { ok: true };
+  return httpJson<{ ok: true }>(SETTINGS_URL, { method: "POST", body: JSON.stringify(next) });
 }

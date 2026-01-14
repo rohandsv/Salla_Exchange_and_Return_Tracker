@@ -1,27 +1,50 @@
 import React from "react";
-import { createHashRouter } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+
 import AppShell from "../../components/layout/AppShell";
 import Landing from "../../pages/shared/Landing";
 import NotFound from "../../pages/shared/NotFound";
-import PortalStart from "../../pages/portal/PortalStart";
-import PortalHome from "../../pages/portal/PortalHome";
-import MerchantHome from "../../pages/merchant/MerchantHome";
-import MerchantConnection from "../../pages/merchant/MerchantConnection";
-import TenantRedirect from "../../pages/shared/TenantRedirect";
 
-const wrap = (node: React.ReactNode) => <AppShell>{node}</AppShell>;
+import MerchantShell from "../../components/layout/MerchantShell";
+import MerchantOverview from "../../pages/merchant/Overview";
+import MerchantInbox from "../../pages/merchant/Inbox";
+import MerchantRules from "../../pages/merchant/Rules";
+import MerchantSettings from "../../pages/merchant/Settings";
 
-export const router = createHashRouter([
-  { path: "/", element: wrap(<Landing />) },
+import PortalShell from "../../components/layout/PortalShell";
+import PortalStart from "../../pages/portal/Start";
+import PortalVerify from "../../pages/portal/Verify";
+import PortalChooseItems from "../../pages/portal/ChooseItems";
+import PortalResolution from "../../pages/portal/Resolution";
+import PortalSuccess from "../../pages/portal/Success";
 
-  { path: "/p", element: wrap(<TenantRedirect to="p" />) },
-  { path: "/m", element: wrap(<TenantRedirect to="m" />) },
+export function AppRouter() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route path="/" element={<Landing />} />
 
-  { path: "/p/:tenantSlug", element: wrap(<PortalStart />) },
-  { path: "/p/:tenantSlug/home", element: wrap(<PortalHome />) },
+          <Route path="/merchant/:tenantSlug" element={<MerchantShell />}>
+            <Route index element={<Navigate to="overview" replace />} />
+            <Route path="overview" element={<MerchantOverview />} />
+            <Route path="inbox" element={<MerchantInbox />} />
+            <Route path="rules" element={<MerchantRules />} />
+            <Route path="settings" element={<MerchantSettings />} />
+          </Route>
 
-  { path: "/m/:tenantSlug", element: wrap(<MerchantHome />) },
-  { path: "/m/:tenantSlug/connection", element: wrap(<MerchantConnection />) },
+          <Route path="/r/:portalSlug" element={<PortalShell />}>
+            <Route index element={<PortalStart />} />
+            <Route path="verify" element={<PortalVerify />} />
+            <Route path="items" element={<PortalChooseItems />} />
+            <Route path="resolution" element={<PortalResolution />} />
+            <Route path="success" element={<PortalSuccess />} />
+          </Route>
 
-  { path: "*", element: wrap(<NotFound />) },
-]);
+          <Route path="/404" element={<NotFound />} />
+          <Route path="*" element={<Navigate to="/404" replace />} />
+        </Route>
+      </Routes>
+    </BrowserRouter>
+  );
+}

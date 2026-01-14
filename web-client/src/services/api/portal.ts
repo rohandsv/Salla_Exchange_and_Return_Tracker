@@ -1,52 +1,42 @@
-import { apiFetch } from "../http";
+import { PortalOrder } from "../../domain/portal";
+import { httpJson } from "../http/client";
+import { mockPortalOrder } from "./mocks";
 
-export type PortalStartReq = {
-  portal_public_slug: string;
-  order_number: string;
-  channel: "phone" | "email";
-  contact: string;
-};
+const USE_MOCKS = (process.env.REACT_APP_USE_MOCKS || "true") === "true";
 
-export type PortalStartRes = { request_id: string };
-
-export function portalStart(p: PortalStartReq) {
-  return apiFetch<PortalStartRes>("/portal/start", { method: "POST", body: p });
+export async function portalStart(_portalSlug: string): Promise<{ ok: true }> {
+  if (USE_MOCKS) return { ok: true };
+  return httpJson<{ ok: true }>(`/portal/start`);
 }
 
-export type PortalVerifyReq = {
-  portal_public_slug: string;
-  order_number: string;
-  otp: string;
-};
-
-export type PortalVerifyRes = {
-  session_token: string;
-  expires_at: string;
-};
-
-export function portalVerify(p: PortalVerifyReq) {
-  return apiFetch<PortalVerifyRes>("/portal/verify", { method: "POST", body: p });
+export async function requestOtp(_portalSlug: string, _orderNumber: string, _email: string) {
+  if (USE_MOCKS) return { ok: true };
+  return httpJson<{ ok: true }>(`/portal/otp/request`, {
+    method: "POST",
+    body: JSON.stringify({ order_number: _orderNumber, email: _email }),
+  });
 }
 
-export type PortalReturnsRes = {
-  items: Array<{
-    return_request_id: string;
-    status: string;
-    created_at: string;
-    mode?: string;
-    tracking_number?: string;
-  }>;
-};
-
-export function portalReturns(portal_public_slug: string, token: string) {
-  return apiFetch<PortalReturnsRes>(
-    `/portal/returns?portal_public_slug=${encodeURIComponent(portal_public_slug)}`,
-    { token }
-  );
+export async function verifyOtp(_portalSlug: string, code: string) {
+  if (USE_MOCKS) return { ok: true };
+  return httpJson<{ ok: true }>(`/portal/otp/verify`, {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
 }
 
-// (Optional) if you use this somewhere
-export type PortalMeRes = { portal_public_slug: string; merchant_connected: boolean };
-export function portalMe(portal_public_slug: string) {
-  return apiFetch<PortalMeRes>(`/portal/me?portal_public_slug=${encodeURIComponent(portal_public_slug)}`);
+export async function getOrder(_portalSlug: string): Promise<PortalOrder> {
+  if (USE_MOCKS) return mockPortalOrder;
+  return httpJson<PortalOrder>(`/portal/order`);
+}
+
+export async function createReturn(
+  _portalSlug: string,
+  payload: { orderNumber: string; itemIds: string[]; reason: string; resolution: "REFUND" | "STORE_CREDIT" | "EXCHANGE" }
+) {
+  if (USE_MOCKS) return { ok: true, rma: "RMA-99281" };
+  return httpJson<{ ok: true; rma: string }>(`/portal/returns`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }

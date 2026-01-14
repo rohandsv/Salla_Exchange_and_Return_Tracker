@@ -20,22 +20,47 @@ export const app = express();
 
 app.use(helmet());
 
-app.use((req, res, next) => {
-  if (req.method === "OPTIONS") return res.status(204).end();
-  next();
-});
-
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-app.use((req, _res, next) => {
+/**
+ * CORS (allowlist + proper headers)
+ * - If ALLOWED_ORIGINS is empty: allow all origins (development convenience)
+ * - If set: only allow those origins
+ */
+app.use((req, res, next) => {
   const origin = req.headers.origin as string | undefined;
+
+  // Non-browser / same-origin calls might not send Origin.
   if (!origin) return next();
-  if (allowedOrigins.length && !allowedOrigins.includes(origin)) {
+
+  const allowAll = allowedOrigins.length === 0;
+  const allowed = allowAll || allowedOrigins.includes(origin);
+
+  if (!allowed) {
     return next(new AppError(403, "CORS not allowed", "CORS_NOT_ALLOWED"));
   }
+
+  // Set CORS headers
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+
+  // If you ever add cookies, switch this to true AND set specific origins only.
+  res.setHeader("Access-Control-Allow-Credentials", "false");
+
+  // Allow typical headers
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Request-Id, X-Merchant-Debug-Key"
+  );
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
   next();
 });
 

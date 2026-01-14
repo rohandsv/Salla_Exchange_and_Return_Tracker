@@ -3,26 +3,18 @@ import React from "react";
 type Props = React.InputHTMLAttributes<HTMLInputElement> & {
   label?: string;
   hint?: string;
+  leftIcon?: React.ReactNode;
 };
 
-export default function Input({ label, hint, style, ...props }: Props) {
+export default function Input({ label, hint, leftIcon, className = "", ...rest }: Props) {
   return (
-    <label style={{ display: "grid", gap: 8 }}>
-      {label ? <span style={{ fontSize: 13, color: "var(--muted)", fontWeight: 600 }}>{label}</span> : null}
-      <input
-        {...props}
-        style={{
-          height: 42,
-          padding: "0 14px",
-          borderRadius: 14,
-          border: "1px solid var(--border)",
-          background: "#fff",
-          outline: "none",
-          boxShadow: "var(--shadow2)",
-          ...style,
-        }}
-      />
-      {hint ? <span style={{ fontSize: 12, color: "var(--muted)" }}>{hint}</span> : null}
-    </label>
+    <div className={`field ${className}`}>
+      {label ? <div className="field-label">{label}</div> : null}
+      <div className="input-wrap">
+        {leftIcon ? <div className="input-ico">{leftIcon}</div> : null}
+        <input className="input" {...rest} />
+      </div>
+      {hint ? <div className="field-hint">{hint}</div> : null}
+    </div>
   );
 }

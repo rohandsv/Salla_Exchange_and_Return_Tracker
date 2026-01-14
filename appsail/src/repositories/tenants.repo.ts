@@ -1,3 +1,4 @@
+// appsail/src/repositories/tenants.repo.ts
 import { getCatalystApp } from "../lib/catalyst";
 
 function assertRowIdDigits(id: string | number) {
@@ -44,13 +45,20 @@ function normalizeSlug(slug: string) {
 }
 
 function makePendingStoreId(portal_public_slug: string) {
-  // NOTE: your schema has salla_store_id mandatory + unique.
-  // In easy mode, we may not know the real store_id at tenant creation time,
-  // so we insert a unique placeholder and overwrite later on authorize webhook.
   const slug = String(portal_public_slug ?? "").trim() || "unknown";
   const v = `pending-${slug}-${Date.now()}`;
-  // keep it safe for varchar limits (you can tweak 120 if your column is larger)
   return v.length > 120 ? v.slice(0, 120) : v;
+}
+
+function safeParseJsonObject(input: string | null | undefined): Record<string, any> {
+  if (!input) return {};
+  try {
+    const v = JSON.parse(String(input));
+    if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, any>;
+    return {};
+  } catch {
+    return {};
+  }
 }
 
 export class TenantsRepo {
@@ -175,14 +183,78 @@ export class TenantsRepo {
   }
 
   /**
-   * ✅ Create tenant row matching your Datastore schema:
-   * Mandatory columns in your screenshot:
-   * - salla_store_id (varchar, mandatory, unique)
-   * - plan_code (varchar, mandatory)
-   * - status (varchar, mandatory)
-   * - portal_public_slug (varchar, mandatory, unique)
-   *
-   * NOTE: We DO NOT write created_at because Catalyst already has CREATEDTIME column.
+   * ✅ Fetch flags_json as an object
+   */
+  static async getFlagsObject(req: any, tenantId: string | number): Promise<Record<string, any>> {
+    const tid = assertRowIdDigits(tenantId);
+
+    // best-effort: reuse cache if possible
+    for (const cached of this.cache.values()) {
+      if (cached.exp > Date.now() && cached.row.ROWID === tid) {
+        return safeParseJsonObject(cached.row.flags_json);
+      }
+    }
+
+    // fallback: scan via findByPortalSlug is not possible without slug
+    // so do a small paged search for ROWID match
+    const app = getCatalystApp(req);
+    const table = app.datastore().table(this.tableName);
+
+    let nextToken: string | undefined = undefined;
+    let more = true;
+    let loops = 0;
+
+    while (more) {
+      const resp = await table.getPagedRows({ nextToken, maxRows: 200 });
+      const rows: any[] = resp?.data ?? [];
+      const match = rows.find((r) => String(r.ROWID) === tid);
+
+      if (match) {
+        const row = this.normalizeRow(match);
+        // update cache if we can infer slug key
+        const slugKey = normalizeSlug(row.portal_public_slug);
+        if (slugKey) this.cache.set(slugKey, { row, exp: Date.now() + this.CACHE_TTL_MS });
+        return safeParseJsonObject(row.flags_json);
+      }
+
+      more = Boolean(resp?.more_records);
+      nextToken = resp?.next_token;
+
+      loops++;
+      if (loops > 50) break;
+    }
+
+    return {};
+  }
+
+  /**
+   * ✅ Merge-patch flags_json (safe, no overwrite blast radius)
+   */
+  static async mergeFlagsObject(
+    req: any,
+    tenantId: string | number,
+    patch: Record<string, any>
+  ): Promise<Record<string, any>> {
+    const tid = assertRowIdDigits(tenantId);
+
+    const current = await this.getFlagsObject(req, tid);
+    const merged = { ...current, ...patch };
+
+    const app = getCatalystApp(req);
+    const table = app.datastore().table(this.tableName);
+
+    await table.updateRow({
+      ROWID: tid,
+      flags_json: JSON.stringify(merged),
+    });
+
+    this.updateCacheByTenantId(tid, { flags_json: JSON.stringify(merged) });
+
+    return merged;
+  }
+
+  /**
+   * ✅ Create tenant row matching your Datastore schema
    */
   static async create(
     req: any,
@@ -200,13 +272,9 @@ export class TenantsRepo {
       status: args.status ?? "draft",
       plan_code: args.plan_code ?? "free",
 
-      // mandatory + unique (placeholder until authorize webhook overwrites it)
       salla_store_id: makePendingStoreId(slug),
 
-      // schema has store_name (varchar) - safe default
       store_name: "",
-
-      // optional
       store_domain: null,
       timezone: null,
       flags_json: null,

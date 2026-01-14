@@ -1,16 +1,21 @@
 import React from "react";
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import Card from "../../components/ui/Card";
 import Button from "../../components/ui/Button";
 
 export default function NotFound() {
+  const nav = useNavigate();
   return (
-    <Card style={{ padding: 18 }}>
-      <div className="h2">Page not found</div>
-      <div className="sub">The page you’re looking for doesn’t exist.</div>
-      <div style={{ marginTop: 14 }}>
-        <Link to="/"><Button variant="primary">Go home</Button></Link>
-      </div>
-    </Card>
+    <div className="page">
+      <main className="container landing">
+        <Card className="landing-card">
+          <div className="landing-title">404</div>
+          <div className="landing-sub">Page not found.</div>
+          <div className="landing-actions">
+            <Button variant="primary" onClick={() => nav("/")}>Go Home</Button>
+          </div>
+        </Card>
+      </main>
+    </div>
   );
 }

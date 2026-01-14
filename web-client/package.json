@@ -2,7 +2,6 @@
   "name": "web-client",
   "version": "0.1.0",
   "private": true,
-  "proxy": "http://localhost:9000",
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
@@ -42,8 +41,8 @@
       "last 1 safari version"
     ]
   },
- "devDependencies": {
-  "@types/node": "^18.19.0",
-  "zcatalyst-cli-plugin-react": "^0.0.4"
-}
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "zcatalyst-cli-plugin-react": "^0.0.4"
+  }
 }

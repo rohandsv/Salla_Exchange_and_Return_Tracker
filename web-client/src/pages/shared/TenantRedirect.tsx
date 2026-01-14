@@ -1,21 +1,23 @@
-import { useEffect } from "react";
-import { useNavigate } from "react-router-dom";
-import { resolveTenantSlug } from "../../lib/tenant";
+import React, { useEffect } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 
-export default function TenantRedirect({ to }: { to: "p" | "m" }) {
+/**
+ * TenantRedirect
+ * Safe redirect helper if user lands on a tenant-less merchant URL.
+ * Example: /merchant -> /merchant/elite-store/overview
+ */
+export default function TenantRedirect() {
   const nav = useNavigate();
+  const loc = useLocation();
 
   useEffect(() => {
-    const slug = resolveTenantSlug(null);
+    // You can customize this default tenant slug.
+    const defaultTenant = "elite-store";
 
-    // If nothing found, send them to landing to enter tenant
-    if (!slug) {
-      nav("/", { replace: true });
-      return;
-    }
-
-    nav(`/${to}/${slug}`, { replace: true });
-  }, [nav, to]);
+    // Preserve querystring if any
+    const qs = loc.search || "";
+    nav(`/merchant/${defaultTenant}/overview${qs}`, { replace: true });
+  }, [nav, loc.search]);
 
   return null;
 }
