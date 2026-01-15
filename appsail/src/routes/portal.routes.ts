@@ -1,6 +1,10 @@
 import { Router } from "express";
 import { requestOtpSchema, verifyOtpSchema } from "../validators/portal.zod";
-import { createReturnSchema, returnNumberParamSchema } from "../validators/returns.zod";
+import {
+  createReturnSchema,
+  returnNumberParamSchema,
+  cancelReturnSchema,
+} from "../validators/returns.zod";
 import { OtpService } from "../services/otp.service";
 import { PortalAuthService } from "../services/portalAuth.service";
 import { ReturnsService } from "../services/returns.service";
@@ -12,7 +16,6 @@ export const portalRoutes = Router();
 
 /**
  * ✅ Base route so GET /portal doesn't return NOT_FOUND
- * Useful for health check / debugging in browser.
  */
 portalRoutes.get("/", (_req, res) => {
   res.json({
@@ -48,7 +51,8 @@ async function resolveTenantRowId(req: any, body: any): Promise<string> {
     const isProd = nodeEnv === "production" || catalystEnv === "production";
 
     const flag = process.env.DEV_AUTO_PROVISION_TENANT;
-    const allowAuto = !isProd && (flag ? ["1", "true", "yes", "on"].includes(String(flag).toLowerCase()) : true);
+    const allowAuto =
+      !isProd && (flag ? ["1", "true", "yes", "on"].includes(String(flag).toLowerCase()) : true);
 
     if (!tenant && allowAuto) {
       tenant = await TenantsRepo.create(req, { portal_public_slug: slug, status: "draft" });
@@ -60,7 +64,6 @@ async function resolveTenantRowId(req: any, body: any): Promise<string> {
 
   throw new AppError(400, "portal_public_slug is required", "TENANT_REQUIRED");
 }
-
 
 /**
  * 1) Request OTP
@@ -172,20 +175,17 @@ portalRoutes.get("/returns/:return_number", authPortal, async (req: any, res, ne
 });
 
 /**
- * 7) Customer cancel a return request (protected)
- * Only allowed when return is still in "requested" status.
+ * 7) Cancel return request by return_number (protected)
+ * Allowed only while status === "requested"
  */
 portalRoutes.post("/returns/:return_number/cancel", authPortal, async (req: any, res, next) => {
   try {
     const params = returnNumberParamSchema.parse(req.params);
-
-    const body = (req.body ?? {}) as any;
-    const cancelReason =
-      body?.reason == null || String(body.reason).trim() === "" ? undefined : String(body.reason).trim();
+    const body = cancelReturnSchema.parse(req.body ?? {});
 
     const result = await ReturnsService.cancelPortalReturn(req, {
       returnNumber: params.return_number,
-      reason: cancelReason,
+      reason: body.reason,
     });
 
     res.json(result);

@@ -1,68 +1,63 @@
 // appsail/src/services/merchantReturns.service.ts
-import { z } from "zod";
 import { AppError } from "../lib/errors";
 import { toCatalystDateTime } from "../lib/datetime";
 import { ReturnRequestsRepo } from "../repositories/returnRequests.repo";
 import { ReturnItemsRepo } from "../repositories/returnItems.repo";
 import { AuditEventsRepo } from "../repositories/auditEvents.repo";
 
-function assertRowIdDigits(id: string | number) {
-  const v = String(id ?? "");
-  if (!/^\d+$/.test(v)) throw new Error("ROWID/FK must be digits");
-  return v;
+function normStatus(s: any) {
+  return String(s ?? "").trim().toLowerCase();
 }
 
-function actorFromReq(req: any) {
-  // Works even with placeholder auth. If later you add real merchant identity, it will populate.
-  const actorId = String(req?.merchant?.id ?? req?.merchant?.email ?? req?.user?.id ?? "merchant");
-  return { actor_type: "merchant", actor_id: actorId };
+function actorId(req: any) {
+  return String(req.merchantUserId ?? req.userId ?? "");
 }
-
-const itemDecisionSchema = z.object({
-  return_item_id: z.string().min(1),
-  decision: z.string().min(1), // e.g. "approved" | "rejected" | "pending"
-  decision_reason: z.string().optional(),
-});
 
 export class MerchantReturnsService {
-  static async getReturnWithItems(req: any, tenantId: string | number, returnNumber: string) {
-    const tid = assertRowIdDigits(tenantId);
-    const rr = await ReturnRequestsRepo.findByReturnNumber(req, tid, returnNumber);
-    if (!rr) throw new AppError(404, "Return not found", "RETURN_NOT_FOUND");
-
-    const items = await ReturnItemsRepo.listByReturnRequestId(req, tid, rr.ROWID);
-
-    return { rr, items };
-  }
-
+  /**
+   * ✅ Update item decisions for a return request
+   * (does not change return status)
+   */
   static async setItemDecisions(
     req: any,
-    tenantId: string | number,
+    tenantIdRaw: string | number,
     returnNumber: string,
-    decisions: Array<z.infer<typeof itemDecisionSchema>>
+    items: Array<{ return_item_id: string; decision: string; decision_reason?: string }>
   ) {
-    const tid = assertRowIdDigits(tenantId);
-    const { rr, items } = await this.getReturnWithItems(req, tid, returnNumber);
+    const tenantId = String(tenantIdRaw || "");
+    if (!tenantId) throw new AppError(400, "tenantId missing", "TENANT_REQUIRED");
 
-    const itemsById = new Map(items.map((it) => [String(it.ROWID), it]));
+    const rr = await ReturnRequestsRepo.findByReturnNumber(req, tenantId, returnNumber);
+    if (!rr) throw new AppError(404, "Return not found", "RETURN_NOT_FOUND");
 
-    const updates = decisions.map((d) => {
-      const id = String(d.return_item_id);
-      const existing = itemsById.get(id);
-      if (!existing) throw new AppError(400, "Invalid return_item_id for this return", "RETURN_ITEM_INVALID");
+    const status = normStatus(rr.status);
+    if (!["requested", "approved", "received"].includes(status)) {
+      throw new AppError(400, "Item decisions cannot be updated at this stage", "RETURN_ITEM_UPDATE_NOT_ALLOWED", {
+        status: rr.status,
+      });
+    }
 
-      return {
-        ROWID: id,
-        decision: String(d.decision),
-        decision_reason: d.decision_reason ? String(d.decision_reason) : null,
-      };
-    });
+    const nowStr = toCatalystDateTime(new Date());
 
-    await ReturnItemsRepo.bulkUpdate(req, updates, 5);
+    await ReturnItemsRepo.bulkUpdateDecisionsByIds(
+      req,
+      tenantId,
+      rr.ROWID,
+      items.map((it) => ({
+        return_item_id: String(it.return_item_id),
+        decision: String(it.decision),
+        decision_reason: it.decision_reason ?? null,
+      })),
+      5
+    );
+
+    // return latest items
+    const updated = await ReturnItemsRepo.listByReturnRequestId(req, tenantId, rr.ROWID);
 
     await AuditEventsRepo.log(req, {
-      tenant_id: tid,
-      ...actorFromReq(req),
+      tenant_id: tenantId,
+      actor_type: "merchant",
+      actor_id: actorId(req),
       action: "return_items_updated",
       entity: "return_requests",
       entity_id: String(rr.ROWID),
@@ -71,39 +66,85 @@ export class MerchantReturnsService {
       user_agent: req.headers?.["user-agent"] || null,
       details_json: JSON.stringify({
         return_number: rr.return_number,
-        updates_count: updates.length,
+        order_number: rr.order_number,
+        items_updated: items.length,
       }),
-      created_at: toCatalystDateTime(new Date()),
+      created_at: nowStr,
     });
 
-    return this.getReturnWithItems(req, tid, returnNumber);
+    return {
+      rr,
+      items: updated.map((it: any) => ({
+        return_item_id: it.ROWID,
+        sku: it.sku,
+        quantity: Number(it.quantity ?? 0),
+        unit_price: it.unit_price == null ? null : Number(it.unit_price),
+        decision: it.decision,
+        decision_reason: it.decision_reason ?? null,
+      })),
+    };
   }
 
-  static async approve(req: any, tenantId: string | number, returnNumber: string, args?: any) {
-    const tid = assertRowIdDigits(tenantId);
-    const nowStr = toCatalystDateTime(new Date());
+  /**
+   * ✅ Approve return (optionally set item decisions)
+   */
+  static async approve(
+    req: any,
+    tenantIdRaw: string | number,
+    returnNumber: string,
+    payload: {
+      status_reason?: string;
+      notes_internal?: string;
+      items?: Array<{ return_item_id: string; decision: string; decision_reason?: string }>;
+    }
+  ) {
+    const tenantId = String(tenantIdRaw || "");
+    if (!tenantId) throw new AppError(400, "tenantId missing", "TENANT_REQUIRED");
 
-    const { rr } = await this.getReturnWithItems(req, tid, returnNumber);
+    const rr = await ReturnRequestsRepo.findByReturnNumber(req, tenantId, returnNumber);
+    if (!rr) throw new AppError(404, "Return not found", "RETURN_NOT_FOUND");
 
-    // Optional: item decisions included along with approval
-    const decisions = Array.isArray(args?.items) ? args.items : null;
-    if (decisions) {
-      const parsed = z.array(itemDecisionSchema).parse(decisions);
-      await this.setItemDecisions(req, tid, returnNumber, parsed);
+    const status = normStatus(rr.status);
+    if (status !== "requested") {
+      throw new AppError(400, "Return cannot be approved at this stage", "RETURN_APPROVE_NOT_ALLOWED", {
+        status: rr.status,
+      });
     }
 
+    const nowStr = toCatalystDateTime(new Date());
+
+    // 1) optional item decision update first
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (items.length) {
+      await ReturnItemsRepo.bulkUpdateDecisionsByIds(
+        req,
+        tenantId,
+        rr.ROWID,
+        items.map((it) => ({
+          return_item_id: String(it.return_item_id),
+          decision: String(it.decision),
+          decision_reason: it.decision_reason ?? null,
+        })),
+        5
+      );
+    }
+
+    // 2) approve request
     await ReturnRequestsRepo.update(req, {
       ROWID: rr.ROWID,
-      tenant_id: tid,
+      tenant_id: tenantId,
       status: "approved",
-      status_reason: args?.status_reason ? String(args.status_reason) : null,
-      notes_internal: args?.notes_internal ? String(args.notes_internal) : rr.notes_internal ?? null,
+      status_reason: payload.status_reason ? String(payload.status_reason) : rr.status_reason ?? null,
       approved_at: nowStr,
+      notes_internal: payload.notes_internal != null ? String(payload.notes_internal) : rr.notes_internal ?? null,
     });
 
+    const updatedItems = await ReturnItemsRepo.listByReturnRequestId(req, tenantId, rr.ROWID);
+
     await AuditEventsRepo.log(req, {
-      tenant_id: tid,
-      ...actorFromReq(req),
+      tenant_id: tenantId,
+      actor_type: "merchant",
+      actor_id: actorId(req),
       action: "return_approved",
       entity: "return_requests",
       entity_id: String(rr.ROWID),
@@ -113,31 +154,66 @@ export class MerchantReturnsService {
       details_json: JSON.stringify({
         return_number: rr.return_number,
         order_number: rr.order_number,
+        status_reason: payload.status_reason ?? null,
+        notes_internal: payload.notes_internal ?? null,
+        items_updated: items.length,
       }),
       created_at: nowStr,
     });
 
-    return this.getReturnWithItems(req, tid, returnNumber);
+    // load fresh rr (optional)
+    const rr2 = await ReturnRequestsRepo.findByReturnNumber(req, tenantId, returnNumber);
+
+    return {
+      rr: rr2 ?? rr,
+      items: updatedItems.map((it: any) => ({
+        return_item_id: it.ROWID,
+        sku: it.sku,
+        quantity: Number(it.quantity ?? 0),
+        unit_price: it.unit_price == null ? null : Number(it.unit_price),
+        decision: it.decision,
+        decision_reason: it.decision_reason ?? null,
+      })),
+    };
   }
 
-  static async reject(req: any, tenantId: string | number, returnNumber: string, args?: any) {
-    const tid = assertRowIdDigits(tenantId);
-    const nowStr = toCatalystDateTime(new Date());
+  /**
+   * ✅ Reject return
+   */
+  static async reject(
+    req: any,
+    tenantIdRaw: string | number,
+    returnNumber: string,
+    payload: { status_reason?: string; notes_internal?: string }
+  ) {
+    const tenantId = String(tenantIdRaw || "");
+    if (!tenantId) throw new AppError(400, "tenantId missing", "TENANT_REQUIRED");
 
-    const { rr } = await this.getReturnWithItems(req, tid, returnNumber);
+    const rr = await ReturnRequestsRepo.findByReturnNumber(req, tenantId, returnNumber);
+    if (!rr) throw new AppError(404, "Return not found", "RETURN_NOT_FOUND");
+
+    const status = normStatus(rr.status);
+    if (status !== "requested") {
+      throw new AppError(400, "Return cannot be rejected at this stage", "RETURN_REJECT_NOT_ALLOWED", {
+        status: rr.status,
+      });
+    }
+
+    const nowStr = toCatalystDateTime(new Date());
 
     await ReturnRequestsRepo.update(req, {
       ROWID: rr.ROWID,
-      tenant_id: tid,
+      tenant_id: tenantId,
       status: "rejected",
-      status_reason: args?.status_reason ? String(args.status_reason) : null,
-      notes_internal: args?.notes_internal ? String(args.notes_internal) : rr.notes_internal ?? null,
-      resolved_at: nowStr, // rejection closes it
+      status_reason: payload.status_reason ? String(payload.status_reason) : rr.status_reason ?? null,
+      notes_internal: payload.notes_internal != null ? String(payload.notes_internal) : rr.notes_internal ?? null,
+      resolved_at: nowStr, // treat rejected as terminal
     });
 
     await AuditEventsRepo.log(req, {
-      tenant_id: tid,
-      ...actorFromReq(req),
+      tenant_id: tenantId,
+      actor_type: "merchant",
+      actor_id: actorId(req),
       action: "return_rejected",
       entity: "return_requests",
       entity_id: String(rr.ROWID),
@@ -147,31 +223,53 @@ export class MerchantReturnsService {
       details_json: JSON.stringify({
         return_number: rr.return_number,
         order_number: rr.order_number,
+        status_reason: payload.status_reason ?? null,
+        notes_internal: payload.notes_internal ?? null,
       }),
       created_at: nowStr,
     });
 
-    return this.getReturnWithItems(req, tid, returnNumber);
+    const rr2 = await ReturnRequestsRepo.findByReturnNumber(req, tenantId, returnNumber);
+    return { rr: rr2 ?? rr };
   }
 
-  static async markReceived(req: any, tenantId: string | number, returnNumber: string, args?: any) {
-    const tid = assertRowIdDigits(tenantId);
-    const nowStr = toCatalystDateTime(new Date());
+  /**
+   * ✅ Mark received
+   */
+  static async markReceived(
+    req: any,
+    tenantIdRaw: string | number,
+    returnNumber: string,
+    payload: { status_reason?: string; notes_internal?: string }
+  ) {
+    const tenantId = String(tenantIdRaw || "");
+    if (!tenantId) throw new AppError(400, "tenantId missing", "TENANT_REQUIRED");
 
-    const { rr } = await this.getReturnWithItems(req, tid, returnNumber);
+    const rr = await ReturnRequestsRepo.findByReturnNumber(req, tenantId, returnNumber);
+    if (!rr) throw new AppError(404, "Return not found", "RETURN_NOT_FOUND");
+
+    const status = normStatus(rr.status);
+    if (status !== "approved") {
+      throw new AppError(400, "Return cannot be marked received at this stage", "RETURN_RECEIVE_NOT_ALLOWED", {
+        status: rr.status,
+      });
+    }
+
+    const nowStr = toCatalystDateTime(new Date());
 
     await ReturnRequestsRepo.update(req, {
       ROWID: rr.ROWID,
-      tenant_id: tid,
+      tenant_id: tenantId,
       status: "received",
-      status_reason: args?.status_reason ? String(args.status_reason) : rr.status_reason ?? null,
-      notes_internal: args?.notes_internal ? String(args.notes_internal) : rr.notes_internal ?? null,
+      status_reason: payload.status_reason ? String(payload.status_reason) : rr.status_reason ?? null,
       received_at: nowStr,
+      notes_internal: payload.notes_internal != null ? String(payload.notes_internal) : rr.notes_internal ?? null,
     });
 
     await AuditEventsRepo.log(req, {
-      tenant_id: tid,
-      ...actorFromReq(req),
+      tenant_id: tenantId,
+      actor_type: "merchant",
+      actor_id: actorId(req),
       action: "return_received",
       entity: "return_requests",
       entity_id: String(rr.ROWID),
@@ -181,62 +279,75 @@ export class MerchantReturnsService {
       details_json: JSON.stringify({
         return_number: rr.return_number,
         order_number: rr.order_number,
+        status_reason: payload.status_reason ?? null,
+        notes_internal: payload.notes_internal ?? null,
       }),
       created_at: nowStr,
     });
 
-    return this.getReturnWithItems(req, tid, returnNumber);
+    const rr2 = await ReturnRequestsRepo.findByReturnNumber(req, tenantId, returnNumber);
+    return { rr: rr2 ?? rr };
   }
 
-  static async resolve(req: any, tenantId: string | number, returnNumber: string, args: any) {
-    const tid = assertRowIdDigits(tenantId);
+  /**
+   * ✅ Resolve return (refund/exchange/store_credit)
+   */
+  static async resolve(
+    req: any,
+    tenantIdRaw: string | number,
+    returnNumber: string,
+    payload: {
+      type: "refund" | "exchange" | "store_credit";
+      status_reason?: string;
+      notes_internal?: string;
+      refund_transaction_id_external?: string;
+      exchange_order_id_external?: string;
+      store_credit_ref_external?: string;
+    }
+  ) {
+    const tenantId = String(tenantIdRaw || "");
+    if (!tenantId) throw new AppError(400, "tenantId missing", "TENANT_REQUIRED");
+
+    const rr = await ReturnRequestsRepo.findByReturnNumber(req, tenantId, returnNumber);
+    if (!rr) throw new AppError(404, "Return not found", "RETURN_NOT_FOUND");
+
+    const status = normStatus(rr.status);
+    if (!(status === "received" || status === "approved")) {
+      throw new AppError(400, "Return cannot be resolved at this stage", "RETURN_RESOLVE_NOT_ALLOWED", {
+        status: rr.status,
+      });
+    }
+
     const nowStr = toCatalystDateTime(new Date());
 
-    const { rr } = await this.getReturnWithItems(req, tid, returnNumber);
+    await ReturnRequestsRepo.update(req, {
+      ROWID: rr.ROWID,
+      tenant_id: tenantId,
+      status: "resolved",
+      status_reason: payload.status_reason ? String(payload.status_reason) : rr.status_reason ?? null,
+      notes_internal: payload.notes_internal != null ? String(payload.notes_internal) : rr.notes_internal ?? null,
+      resolved_at: nowStr,
 
-    const schema = z.object({
-      type: z.enum(["refund", "exchange", "store_credit"]),
-      refund_transaction_id_external: z.string().optional(),
-      exchange_order_id_external: z.string().optional(),
-      store_credit_ref_external: z.string().optional(),
-      status_reason: z.string().optional(),
-      notes_internal: z.string().optional(),
+      exchange_order_id_external:
+        payload.exchange_order_id_external != null
+          ? String(payload.exchange_order_id_external)
+          : rr.exchange_order_id_external ?? null,
+
+      refund_transaction_id_external:
+        payload.refund_transaction_id_external != null
+          ? String(payload.refund_transaction_id_external)
+          : rr.refund_transaction_id_external ?? null,
+
+      store_credit_ref_external:
+        payload.store_credit_ref_external != null
+          ? String(payload.store_credit_ref_external)
+          : rr.store_credit_ref_external ?? null,
     });
 
-    const body = schema.parse(args ?? {});
-
-    const updatePayload: any = {
-      ROWID: rr.ROWID,
-      tenant_id: tid,
-      status: "resolved",
-      status_reason: body.status_reason ? String(body.status_reason) : rr.status_reason ?? null,
-      notes_internal: body.notes_internal ? String(body.notes_internal) : rr.notes_internal ?? null,
-      resolved_at: nowStr,
-    };
-
-    if (body.type === "refund") {
-      updatePayload.refund_transaction_id_external = body.refund_transaction_id_external
-        ? String(body.refund_transaction_id_external)
-        : rr.refund_transaction_id_external ?? null;
-    }
-
-    if (body.type === "exchange") {
-      updatePayload.exchange_order_id_external = body.exchange_order_id_external
-        ? String(body.exchange_order_id_external)
-        : rr.exchange_order_id_external ?? null;
-    }
-
-    if (body.type === "store_credit") {
-      updatePayload.store_credit_ref_external = body.store_credit_ref_external
-        ? String(body.store_credit_ref_external)
-        : rr.store_credit_ref_external ?? null;
-    }
-
-    await ReturnRequestsRepo.update(req, updatePayload);
-
     await AuditEventsRepo.log(req, {
-      tenant_id: tid,
-      ...actorFromReq(req),
+      tenant_id: tenantId,
+      actor_type: "merchant",
+      actor_id: actorId(req),
       action: "return_resolved",
       entity: "return_requests",
       entity_id: String(rr.ROWID),
@@ -246,11 +357,57 @@ export class MerchantReturnsService {
       details_json: JSON.stringify({
         return_number: rr.return_number,
         order_number: rr.order_number,
-        resolution_type: body.type,
+        resolution_type: payload.type,
+        status_reason: payload.status_reason ?? null,
+        notes_internal: payload.notes_internal ?? null,
+        exchange_order_id_external: payload.exchange_order_id_external ?? null,
+        refund_transaction_id_external: payload.refund_transaction_id_external ?? null,
+        store_credit_ref_external: payload.store_credit_ref_external ?? null,
       }),
       created_at: nowStr,
     });
 
-    return this.getReturnWithItems(req, tid, returnNumber);
+    const rr2 = await ReturnRequestsRepo.findByReturnNumber(req, tenantId, returnNumber);
+    return { rr: rr2 ?? rr };
+  }
+
+  // ---------------------------
+  // Backwards compatible methods
+  // ---------------------------
+
+  static async approveReturn(req: any, args: { tenantId: string; returnNumber: string; status_reason?: string }) {
+    const out = await this.approve(req, args.tenantId, args.returnNumber, { status_reason: args.status_reason });
+    return { ok: true, return_number: out.rr.return_number, status: "approved", approved_at: out.rr.approved_at };
+  }
+
+  static async receiveReturn(req: any, args: { tenantId: string; returnNumber: string; status_reason?: string }) {
+    const out = await this.markReceived(req, args.tenantId, args.returnNumber, { status_reason: args.status_reason });
+    return { ok: true, return_number: out.rr.return_number, status: "received", received_at: out.rr.received_at };
+  }
+
+  static async resolveReturn(req: any, args: {
+    tenantId: string;
+    returnNumber: string;
+    status_reason?: string;
+    items?: Array<{ return_item_id: string; decision: string; decision_reason?: string }>;
+    exchange_order_id_external?: string;
+    refund_transaction_id_external?: string;
+    store_credit_ref_external?: string;
+  }) {
+    // keep existing signature but map into resolve()
+    const out = await this.resolve(req, args.tenantId, args.returnNumber, {
+      type: args.exchange_order_id_external ? "exchange" : args.refund_transaction_id_external ? "refund" : "store_credit",
+      status_reason: args.status_reason,
+      exchange_order_id_external: args.exchange_order_id_external,
+      refund_transaction_id_external: args.refund_transaction_id_external,
+      store_credit_ref_external: args.store_credit_ref_external,
+    });
+
+    return {
+      ok: true,
+      return_number: out.rr.return_number,
+      status: "resolved",
+      resolved_at: out.rr.resolved_at,
+    };
   }
 }
