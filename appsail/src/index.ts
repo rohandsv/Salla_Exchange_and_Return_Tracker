@@ -1,12 +1,12 @@
-// appsail/src/index.ts
-import "dotenv/config"; // ✅ MUST be first (before app/env imports)
-
 import { app } from "./app";
 import { logger } from "./lib/logger";
 
-// AppSail expects this env var
-const port = Number(process.env.X_ZOHO_CATALYST_LISTEN_PORT || 9000);
+const portStr = process.env.X_ZOHO_CATALYST_LISTEN_PORT?.trim();
+if (!portStr) throw new Error("X_ZOHO_CATALYST_LISTEN_PORT not provided by AppSail");
 
-app.listen(port, () => {
-  logger.info({ port }, "AppSail server started");
+const port = Number.parseInt(portStr, 10);
+if (!Number.isFinite(port) || port <= 0) throw new Error(`Invalid port: "${portStr}"`);
+
+app.listen(port, "0.0.0.0", () => {
+  logger.info({ port }, "🚀 AppSail service listening");
 });

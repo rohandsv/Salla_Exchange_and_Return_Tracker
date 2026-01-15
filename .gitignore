@@ -51,3 +51,15 @@ temp/
 # Misc
 *.tgz
 .cache-loader/
+# Catalyst / logs
+catalyst-debug.log
+*.log
+
+# TypeScript build cache
+*.tsbuildinfo
+
+# dependencies & builds
+node_modules/
+dist/
+build/
+.next/

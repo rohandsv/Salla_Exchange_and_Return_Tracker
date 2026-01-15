@@ -5,133 +5,643 @@ import { SallaOAuthService } from "../services/sallaOAuth.service";
 import { TenantsRepo } from "../repositories/tenants.repo";
 import { SallaOauthTokensRepo } from "../repositories/sallaOauthTokens.repo";
 import { AppError } from "../lib/errors";
-
-// Optional: if you already have a placeholder auth middleware, you can enable it.
-// import { authMerchantPlaceholder } from "../middlewares/authMerchantPlaceholder";
+import { authMerchant } from "../middlewares/authMerchantPlaceholder";
+import {
+  validatePortalSlug,
+  resolveTenantByPortalSlug,
+  resolveTenantFromRouteParam,
+} from "../lib/tenantResolve";
+import { ReturnRequestsRepo } from "../repositories/returnRequests.repo";
+import { ReturnItemsRepo } from "../repositories/returnItems.repo";
+import { MerchantReturnsService } from "../services/merchantReturns.service";
 
 export const merchantRoutes = Router();
 
-function assertRowIdDigits(id: any) {
-  const v = String(id ?? "").trim();
-  if (!/^\d+$/.test(v)) throw new AppError(400, "Invalid tenant_id", "TENANT_ID_INVALID");
-  return v;
-}
+merchantRoutes.get("/", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "merchant",
+    routes: [
+      "POST /merchant/tenants",
+      "GET  /merchant/oauth/start?portal_public_slug=...",
+
+      "GET  /merchant/:tenantSlug/kpis",
+
+      "GET  /merchant/:tenantSlug/returns",
+      "GET  /merchant/:tenantSlug/returns/:return_number",
+
+      // ✅ NEW actions
+      "POST /merchant/:tenantSlug/returns/:return_number/items",
+      "POST /merchant/:tenantSlug/returns/:return_number/approve",
+      "POST /merchant/:tenantSlug/returns/:return_number/reject",
+      "POST /merchant/:tenantSlug/returns/:return_number/received",
+      "POST /merchant/:tenantSlug/returns/:return_number/resolve",
+
+      "GET  /merchant/:tenantSlug/rules",
+      "PUT  /merchant/:tenantSlug/rules",
+      "GET  /merchant/:tenantSlug/settings",
+      "PUT  /merchant/:tenantSlug/settings",
+    ],
+  });
+});
 
 /**
- * Accept either:
- * - tenant_id (ROWID digits)
- * - portal_public_slug (we resolve to tenant ROWID)
+ * -------------------------
+ * Existing endpoints (kept)
+ * -------------------------
  */
-async function resolveTenantRowId(req: any, q: any): Promise<string> {
-  if (q.tenant_id) return assertRowIdDigits(q.tenant_id);
 
-  if (q.portal_public_slug) {
-    const tenant = await TenantsRepo.findByPortalSlug(req, String(q.portal_public_slug));
-    if (!tenant) throw new AppError(400, "Invalid portal", "TENANT_NOT_FOUND");
-    return assertRowIdDigits(tenant.ROWID);
+merchantRoutes.post("/tenants", async (req: any, res, next) => {
+  try {
+    const body = z
+      .object({
+        portal_public_slug: z.string().min(1),
+      })
+      .parse(req.body);
+
+    const slug = validatePortalSlug(body.portal_public_slug);
+
+    let tenant = await TenantsRepo.findByPortalSlug(req, slug);
+
+    if (!tenant) {
+      await TenantsRepo.create(req, { portal_public_slug: slug, status: "draft" });
+      tenant = await TenantsRepo.findByPortalSlug(req, slug);
+      if (!tenant) {
+        throw new AppError(500, "Tenant created but could not be loaded", "TENANT_CREATE_FAILED");
+      }
+
+      return res.status(201).json({
+        ok: true,
+        created: true,
+        tenant: {
+          tenant_id: tenant.ROWID,
+          portal_public_slug: tenant.portal_public_slug,
+          status: tenant.status ?? null,
+        },
+      });
+    }
+
+    return res.json({
+      ok: true,
+      created: false,
+      tenant: {
+        tenant_id: tenant.ROWID,
+        portal_public_slug: tenant.portal_public_slug,
+        status: tenant.status ?? null,
+      },
+    });
+  } catch (e) {
+    next(e);
   }
+});
 
-  throw new AppError(400, "tenant_id or portal_public_slug is required", "TENANT_REQUIRED");
-}
-
-/**
- * GET /merchant/oauth/start?tenant_id=1768...  (or ?portal_public_slug=aaa)
- * Returns JSON { ok, url } and also supports redirect mode.
- */
 merchantRoutes.get("/oauth/start", async (req: any, res, next) => {
   try {
-    // authMerchantPlaceholder(req, res, next) // enable if you want merchant-side protection
-
     const qs = z
       .object({
-        tenant_id: z.union([z.string(), z.number()]).optional(),
-        portal_public_slug: z.string().min(1).optional(),
-        mode: z.enum(["json", "redirect"]).optional(), // redirect by default if not json
+        portal_public_slug: z.string().min(1),
+        mode: z.enum(["json", "redirect"]).optional(),
       })
       .parse(req.query);
 
-    const tenantRowId = await resolveTenantRowId(req, qs);
+    await resolveTenantByPortalSlug(req, qs.portal_public_slug);
 
-    const result = await SallaOAuthService.start(req, { tenantRowId });
+    const result = await SallaOAuthService.start(req, { portal_public_slug: qs.portal_public_slug });
 
-    // Default behavior = redirect
     const mode = qs.mode || "redirect";
     if (mode === "json") return res.json(result);
-
     return res.redirect(result.url);
   } catch (e) {
     next(e);
   }
 });
 
-/**
- * GET /merchant/oauth/callback?code=...&state=...
- * Exchanges tokens + stores encrypted tokens in salla_oauth_tokens.
- */
-merchantRoutes.get("/oauth/callback", async (req: any, res, next) => {
+merchantRoutes.post("/oauth/start", async (req: any, res, next) => {
   try {
+    const input = { ...req.query, ...(req.body ?? {}) };
+
     const qs = z
       .object({
-        code: z.string().min(1),
-        state: z.string().min(1),
+        portal_public_slug: z.string().min(1),
+        mode: z.enum(["json", "redirect"]).optional(),
       })
-      .parse(req.query);
+      .parse(input);
 
-    await SallaOAuthService.callback(req, {
-      code: String(qs.code),
-      state: String(qs.state),
+    await resolveTenantByPortalSlug(req, qs.portal_public_slug);
+
+    const result = await SallaOAuthService.start(req, { portal_public_slug: qs.portal_public_slug });
+
+    const mode = qs.mode || "redirect";
+    if (mode === "json") return res.json(result);
+    return res.redirect(result.url);
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.get("/oauth/status", async (req: any, res, next) => {
+  try {
+    const qs = z.object({ portal_public_slug: z.string().min(1) }).parse(req.query);
+    const tenant = await resolveTenantByPortalSlug(req, qs.portal_public_slug);
+    const row = await SallaOauthTokensRepo.findByTenantId(req, tenant.ROWID);
+
+    if (!row) {
+      return res.json({
+        ok: true,
+        connected: false,
+        portal_public_slug: tenant.portal_public_slug,
+        tenant: {
+          tenant_id: tenant.ROWID,
+          status: tenant.status ?? null,
+          salla_store_id: tenant.salla_store_id ?? null,
+          store_name: tenant.store_name ?? null,
+          store_domain: tenant.store_domain ?? null,
+        },
+        token: null,
+        oauth_mode: SallaOAuthService.mode(),
+      });
+    }
+
+    const tokenStatus = String(row.token_status || "").toLowerCase();
+    const connected = tokenStatus === "active";
+
+    return res.json({
+      ok: true,
+      connected,
+      portal_public_slug: tenant.portal_public_slug,
+      tenant: {
+        tenant_id: tenant.ROWID,
+        status: tenant.status ?? null,
+        salla_store_id: tenant.salla_store_id ?? null,
+        store_name: tenant.store_name ?? null,
+        store_domain: tenant.store_domain ?? null,
+      },
+      token: {
+        token_status: row.token_status ?? null,
+        scopes: row.scopes ?? null,
+        token_type: row.token_type ?? null,
+        access_token_expires_at: row.access_token_expires_at ?? null,
+        last_token_refresh_at: row.last_token_refresh_at ?? null,
+        installed_at: row.installed_at ?? null,
+        uninstalled_at: row.uninstalled_at ?? null,
+      },
+      oauth_mode: SallaOAuthService.mode(),
     });
-
-    // Simple success page (replace later with redirect to your web UI)
-    res.status(200).send(`
-      <html>
-        <head><title>Salla Connected</title></head>
-        <body style="font-family: Arial, sans-serif; padding: 24px;">
-          <h2>✅ Salla OAuth Connected</h2>
-          <p>You can close this window now.</p>
-        </body>
-      </html>
-    `);
   } catch (e) {
     next(e);
   }
 });
 
 /**
- * GET /merchant/oauth/status?tenant_id=...
- * Returns safe status for merchant UI (NO tokens).
+ * -----------------------------------------
+ * Tenant-aware Merchant API
+ * -----------------------------------------
  */
-merchantRoutes.get("/oauth/status", async (req: any, res, next) => {
+
+const kpisResponseSchema = z.object({
+  awaiting_action: z.number().int().nonnegative(),
+  transit_volume: z.number().int().nonnegative(),
+  retention_rate: z.number().min(0).max(100),
+  automation_pct: z.number().min(0).max(100),
+  financial_guard: z.object({
+    total_savings_sar: z.number().nonnegative(),
+    delta_pct: z.number(),
+    cash_refunded_sar: z.number(),
+    credit_issued_sar: z.number(),
+  }),
+});
+type MerchantKpis = z.infer<typeof kpisResponseSchema>;
+
+function defaultKpis(): MerchantKpis {
+  return {
+    awaiting_action: 0,
+    transit_volume: 0,
+    retention_rate: 0,
+    automation_pct: 0,
+    financial_guard: {
+      total_savings_sar: 0,
+      delta_pct: 0,
+      cash_refunded_sar: 0,
+      credit_issued_sar: 0,
+    },
+  };
+}
+
+const rulesSchema = z.object({
+  return_window_days: z.number().int().min(0).max(365).default(30),
+  auto_approval_threshold_sar: z.number().min(0).default(150),
+  accept_store_credit: z.boolean().default(true),
+  allow_exchanges: z.boolean().default(true),
+  auto_approve_low_value: z.boolean().default(true),
+  category_overrides: z
+    .array(
+      z.object({
+        category_name: z.string().min(1),
+        rule: z.enum(["STANDARD_WINDOW", "NON_RETURNABLE", "DAY_LIMIT"]),
+        day_limit: z.number().int().min(0).max(365).optional(),
+      })
+    )
+    .default([]),
+});
+type MerchantRules = z.infer<typeof rulesSchema>;
+
+function defaultRules(): MerchantRules {
+  return {
+    return_window_days: 30,
+    auto_approval_threshold_sar: 150,
+    accept_store_credit: true,
+    allow_exchanges: true,
+    auto_approve_low_value: true,
+    category_overrides: [],
+  };
+}
+
+const settingsSchema = z.object({
+  branding: z
+    .object({
+      primary_color: z.string().min(1).default("#4f46e5"),
+      logo_url: z.string().url().optional(),
+    })
+    .default({ primary_color: "#4f46e5" }),
+  portal: z
+    .object({
+      support_email: z.string().email().optional(),
+      policy_url: z.string().url().optional(),
+    })
+    .default({}),
+});
+type MerchantSettings = z.infer<typeof settingsSchema>;
+
+function readNested<T>(obj: any, path: string[]): T | undefined {
+  let cur = obj;
+  for (const k of path) {
+    if (!cur || typeof cur !== "object") return undefined;
+    cur = cur[k];
+  }
+  return cur as T;
+}
+
+merchantRoutes.get("/:tenantSlug/kpis", authMerchant, async (req: any, res, next) => {
   try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const flags = await TenantsRepo.getFlagsObject(req, tenant.ROWID);
+
+    const stored = readNested<MerchantKpis>(flags, ["merchant", "kpis"]);
+    const kpis = stored ? kpisResponseSchema.parse(stored) : defaultKpis();
+
+    res.json({
+      ok: true,
+      tenant: {
+        tenant_id: tenant.ROWID,
+        portal_public_slug: tenant.portal_public_slug,
+        store_name: tenant.store_name ?? null,
+        store_domain: tenant.store_domain ?? null,
+      },
+      kpis,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.get("/:tenantSlug/returns", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+
     const qs = z
       .object({
-        tenant_id: z.union([z.string(), z.number()]).optional(),
-        portal_public_slug: z.string().min(1).optional(),
+        status: z.string().optional(),
+        limit: z
+          .string()
+          .optional()
+          .transform((v) => (v == null || v.trim() === "" ? undefined : Number(v))),
       })
       .parse(req.query);
 
-    const tenantRowId = await resolveTenantRowId(req, qs);
-    const row = await SallaOauthTokensRepo.findByTenantId(req, tenantRowId);
+    const rows = await ReturnRequestsRepo.listByTenant(req, tenant.ROWID, {
+      status: qs.status ? String(qs.status).trim() : undefined,
+      limit: typeof qs.limit === "number" && Number.isFinite(qs.limit) ? qs.limit : 200,
+    });
 
-    if (!row) {
-      return res.json({
-        ok: true,
-        connected: false,
-        tenant_id: tenantRowId,
-      });
-    }
+    res.json({
+      ok: true,
+      tenant: {
+        tenant_id: tenant.ROWID,
+        portal_public_slug: tenant.portal_public_slug,
+      },
+      items: rows.map((r) => ({
+        return_request_id: r.ROWID,
+        return_number: r.return_number,
+        order_number: r.order_number,
+        order_id_external: r.order_id_external ?? null,
+        requested_resolution: r.requested_resolution,
+        status: r.status,
+        status_reason: r.status_reason ?? null,
+        requested_at: r.requested_at,
+        resolved_at: r.resolved_at ?? null,
+        total_items_count: Number(r.total_items_count ?? 0),
+        total_request_value: r.total_request_value == null ? null : Number(r.total_request_value),
+        is_warranty: Boolean(r.is_warranty),
+      })),
+      page: { next_cursor: null },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.get("/:tenantSlug/returns/:return_number", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+
+    const params = z
+      .object({
+        return_number: z.string().min(1),
+      })
+      .parse(req.params);
+
+    const rr = await ReturnRequestsRepo.findByReturnNumber(req, tenant.ROWID, params.return_number);
+    if (!rr) throw new AppError(404, "Return not found", "RETURN_NOT_FOUND");
+
+    const items = await ReturnItemsRepo.listByReturnRequestId(req, tenant.ROWID, rr.ROWID);
+
+    res.json({
+      ok: true,
+      tenant: { tenant_id: tenant.ROWID, portal_public_slug: tenant.portal_public_slug },
+      return: {
+        return_request_id: rr.ROWID,
+        return_number: rr.return_number,
+        order_number: rr.order_number,
+        order_id_external: rr.order_id_external ?? null,
+
+        requested_resolution: rr.requested_resolution,
+        status: rr.status,
+        status_reason: rr.status_reason ?? null,
+
+        requested_at: rr.requested_at,
+        approved_at: rr.approved_at ?? null,
+        received_at: rr.received_at ?? null,
+        resolved_at: rr.resolved_at ?? null,
+
+        notes_customer: rr.notes_customer ?? null,
+        notes_internal: rr.notes_internal ?? null,
+
+        total_items_count: Number(rr.total_items_count ?? 0),
+        total_request_value: rr.total_request_value == null ? null : Number(rr.total_request_value),
+        is_warranty: Boolean(rr.is_warranty),
+
+        items: items.map((it) => ({
+          return_item_id: it.ROWID,
+          sku: it.sku,
+          product_name: it.product_name ?? null,
+          variant_name: it.variant_name ?? null,
+          quantity: Number((it as any).quantity ?? 0),
+          unit_price: (it as any).unit_price == null ? null : Number((it as any).unit_price),
+          reason_code: it.reason_code,
+          reason_note: it.reason_note ?? null,
+          decision: it.decision,
+          decision_reason: it.decision_reason ?? null,
+        })),
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * ----------------------------
+ * ✅ NEW merchant action routes
+ * ----------------------------
+ */
+
+merchantRoutes.post("/:tenantSlug/returns/:return_number/items", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
+
+    const body = z
+      .object({
+        items: z
+          .array(
+            z.object({
+              return_item_id: z.string().min(1),
+              decision: z.string().min(1),
+              decision_reason: z.string().optional(),
+            })
+          )
+          .min(1),
+      })
+      .parse(req.body ?? {});
+
+    const { rr, items } = await MerchantReturnsService.setItemDecisions(
+      req,
+      tenant.ROWID,
+      params.return_number,
+      body.items.map((it) => ({
+        return_item_id: it.return_item_id,
+        decision: it.decision,
+        decision_reason: it.decision_reason,
+      }))
+    );
+
+    return res.json({ ok: true, return_request_id: rr.ROWID, return_number: rr.return_number, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.post("/:tenantSlug/returns/:return_number/approve", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
+
+    const body = z
+      .object({
+        status_reason: z.string().optional(),
+        notes_internal: z.string().optional(),
+        items: z
+          .array(
+            z.object({
+              return_item_id: z.string().min(1),
+              decision: z.string().min(1),
+              decision_reason: z.string().optional(),
+            })
+          )
+          .optional(),
+      })
+      .parse(req.body ?? {});
+
+    const { rr, items } = await MerchantReturnsService.approve(req, tenant.ROWID, params.return_number, {
+      status_reason: body.status_reason,
+      notes_internal: body.notes_internal,
+      items: body.items?.map((it) => ({
+        return_item_id: it.return_item_id,
+        decision: it.decision,
+        decision_reason: it.decision_reason,
+      })),
+    });
+
+    return res.json({ ok: true, return_request_id: rr.ROWID, return_number: rr.return_number, status: "approved", items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.post("/:tenantSlug/returns/:return_number/reject", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
+
+    const body = z
+      .object({
+        status_reason: z.string().optional(),
+        notes_internal: z.string().optional(),
+      })
+      .parse(req.body ?? {});
+
+    const { rr } = await MerchantReturnsService.reject(req, tenant.ROWID, params.return_number, body);
 
     return res.json({
       ok: true,
-      connected: String(row.token_status || "").toLowerCase() === "active",
-      tenant_id: tenantRowId,
-      token_status: row.token_status ?? null,
-      scopes: row.scopes ?? null,
-      access_token_expires_at: row.access_token_expires_at ?? null,
-      last_token_refresh_at: row.last_token_refresh_at ?? null,
-      installed_at: row.installed_at ?? null,
-      uninstalled_at: row.uninstalled_at ?? null,
-      tenant_unique_key: row.tenant_unique_key ?? null,
+      return_request_id: rr.ROWID,
+      return_number: rr.return_number,
+      status: "rejected",
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.post("/:tenantSlug/returns/:return_number/received", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
+
+    const body = z
+      .object({
+        status_reason: z.string().optional(),
+        notes_internal: z.string().optional(),
+      })
+      .parse(req.body ?? {});
+
+    const { rr } = await MerchantReturnsService.markReceived(req, tenant.ROWID, params.return_number, body);
+
+    return res.json({
+      ok: true,
+      return_request_id: rr.ROWID,
+      return_number: rr.return_number,
+      status: "received",
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.post("/:tenantSlug/returns/:return_number/resolve", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
+
+    const body = z
+      .object({
+        type: z.enum(["refund", "exchange", "store_credit"]),
+        refund_transaction_id_external: z.string().optional(),
+        exchange_order_id_external: z.string().optional(),
+        store_credit_ref_external: z.string().optional(),
+        status_reason: z.string().optional(),
+        notes_internal: z.string().optional(),
+      })
+      .parse(req.body ?? {});
+
+    const { rr } = await MerchantReturnsService.resolve(req, tenant.ROWID, params.return_number, body);
+
+    return res.json({
+      ok: true,
+      return_request_id: rr.ROWID,
+      return_number: rr.return_number,
+      status: "resolved",
+      resolution_type: body.type,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * -----------------------
+ * Rules / Settings (kept)
+ * -----------------------
+ */
+
+merchantRoutes.get("/:tenantSlug/rules", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const flags = await TenantsRepo.getFlagsObject(req, tenant.ROWID);
+
+    const stored = readNested<MerchantRules>(flags, ["merchant", "rules"]);
+    const rules = stored ? rulesSchema.parse(stored) : defaultRules();
+
+    res.json({
+      ok: true,
+      tenant: { tenant_id: tenant.ROWID, portal_public_slug: tenant.portal_public_slug },
+      rules,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.put("/:tenantSlug/rules", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const body = rulesSchema.parse(req.body ?? {});
+
+    const merged = await TenantsRepo.mergeFlagsObject(req, tenant.ROWID, {
+      merchant: { rules: body },
+    });
+
+    res.json({
+      ok: true,
+      tenant: { tenant_id: tenant.ROWID, portal_public_slug: tenant.portal_public_slug },
+      rules: rulesSchema.parse(readNested<any>(merged, ["merchant", "rules"]) ?? body),
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.get("/:tenantSlug/settings", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const flags = await TenantsRepo.getFlagsObject(req, tenant.ROWID);
+
+    const stored = readNested<MerchantSettings>(flags, ["merchant", "settings"]);
+    const settings = stored ? settingsSchema.parse(stored) : settingsSchema.parse({});
+
+    res.json({
+      ok: true,
+      tenant: { tenant_id: tenant.ROWID, portal_public_slug: tenant.portal_public_slug },
+      settings,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+merchantRoutes.put("/:tenantSlug/settings", authMerchant, async (req: any, res, next) => {
+  try {
+    const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
+    const body = settingsSchema.parse(req.body ?? {});
+
+    const merged = await TenantsRepo.mergeFlagsObject(req, tenant.ROWID, {
+      merchant: { settings: body },
+    });
+
+    res.json({
+      ok: true,
+      tenant: { tenant_id: tenant.ROWID, portal_public_slug: tenant.portal_public_slug },
+      settings: settingsSchema.parse(readNested<any>(merged, ["merchant", "settings"]) ?? body),
     });
   } catch (e) {
     next(e);

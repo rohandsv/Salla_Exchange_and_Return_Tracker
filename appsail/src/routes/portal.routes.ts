@@ -11,19 +11,56 @@ import { AppError } from "../lib/errors";
 export const portalRoutes = Router();
 
 /**
+ * ✅ Base route so GET /portal doesn't return NOT_FOUND
+ * Useful for health check / debugging in browser.
+ */
+portalRoutes.get("/", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "portal",
+    routes: [
+      "POST /portal/request-otp",
+      "POST /portal/verify-otp",
+      "GET  /portal/me",
+      "POST /portal/returns",
+      "GET  /portal/returns",
+      "GET  /portal/returns/:return_number",
+      "POST /portal/returns/:return_number/cancel",
+    ],
+  });
+});
+
+/**
  * Resolve tenant ROWID internally using portal_public_slug.
  */
 async function resolveTenantRowId(req: any, body: any): Promise<string> {
   if (body.tenant_id) return String(body.tenant_id);
 
   if (body.portal_public_slug) {
-    const tenant = await TenantsRepo.findByPortalSlug(req, body.portal_public_slug);
-    if (!tenant) throw new AppError(400, "Invalid portal", "TENANT_NOT_FOUND");
+    const slug = String(body.portal_public_slug ?? "").trim();
+    if (!slug) throw new AppError(400, "portal_public_slug is required", "TENANT_REQUIRED");
+
+    let tenant = await TenantsRepo.findByPortalSlug(req, slug);
+
+    // ✅ dev-only auto-provision
+    const nodeEnv = String(process.env.NODE_ENV ?? "").toLowerCase();
+    const catalystEnv = String((process.env as any).CATALYST_ENV ?? "").toLowerCase();
+    const isProd = nodeEnv === "production" || catalystEnv === "production";
+
+    const flag = process.env.DEV_AUTO_PROVISION_TENANT;
+    const allowAuto = !isProd && (flag ? ["1", "true", "yes", "on"].includes(String(flag).toLowerCase()) : true);
+
+    if (!tenant && allowAuto) {
+      tenant = await TenantsRepo.create(req, { portal_public_slug: slug, status: "draft" });
+    }
+
+    if (!tenant) throw new AppError(404, "Unknown portal_public_slug", "TENANT_NOT_FOUND");
     return String(tenant.ROWID);
   }
 
   throw new AppError(400, "portal_public_slug is required", "TENANT_REQUIRED");
 }
+
 
 /**
  * 1) Request OTP
@@ -126,6 +163,29 @@ portalRoutes.get("/returns/:return_number", authPortal, async (req: any, res, ne
 
     const result = await ReturnsService.getPortalReturnDetails(req, {
       returnNumber: params.return_number,
+    });
+
+    res.json(result);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * 7) Customer cancel a return request (protected)
+ * Only allowed when return is still in "requested" status.
+ */
+portalRoutes.post("/returns/:return_number/cancel", authPortal, async (req: any, res, next) => {
+  try {
+    const params = returnNumberParamSchema.parse(req.params);
+
+    const body = (req.body ?? {}) as any;
+    const cancelReason =
+      body?.reason == null || String(body.reason).trim() === "" ? undefined : String(body.reason).trim();
+
+    const result = await ReturnsService.cancelPortalReturn(req, {
+      returnNumber: params.return_number,
+      reason: cancelReason,
     });
 
     res.json(result);
