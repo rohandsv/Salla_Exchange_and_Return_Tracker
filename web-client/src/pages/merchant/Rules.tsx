@@ -32,101 +32,305 @@ export default function MerchantRules() {
 
   if (!rules) {
     return (
-      <Card className="rules-left">
-        <div style={{ padding: 18 }}>
-          <div className="muted" style={{ fontWeight: 900 }}>Loading rules…</div>
-        </div>
+      <Card className="rl-card">
+        <style>{`
+          .rl-card{ width:100%; border-radius:16px; padding:18px; }
+          .rl-muted{ color:#64748b; font-weight:1000; }
+        `}</style>
+        <div className="rl-muted">Loading rules…</div>
       </Card>
     );
   }
 
   return (
     <>
-      <Toast open={toast.open} type={toast.type} message={toast.msg} onClose={() => setToast((t) => ({ ...t, open: false }))} />
+      <style>{`
+        .rl-wrap{ width:100%; }
+        .rl-grid{
+          width:100%;
+          display:grid;
+          grid-template-columns: 1.15fr 1fr;
+          gap: 12px;
+          align-items:start;
+        }
 
-      <div className="rules-grid">
-        <Card className="rules-left">
-          <div className="rules-title">
-            <div className="rules-ico">🛡</div>
-            <div>
-              <div className="strong">Automation Core</div>
-              <div className="muted small">Define global automation rules</div>
-            </div>
-          </div>
+        .rl-card{
+          width:100%;
+          border-radius:16px;
+          overflow:hidden;
+        }
 
-          <div className="rules-block">
-            <div className="row space">
-              <div className="muted small">RETURN WINDOW</div>
-              <div className="strong">{rules.returnWindowDays} DAYS</div>
-            </div>
-            <input
-              className="range"
-              type="range"
-              min={1}
-              max={60}
-              value={rules.returnWindowDays}
-              onChange={(e) => setRules({ ...rules, returnWindowDays: Number(e.target.value) })}
-            />
-          </div>
+        .rl-head{
+          display:flex;
+          align-items:center;
+          gap:12px;
+          padding:14px;
+          border-bottom:1px solid #e6e8f0;
+          background:#fff;
+        }
 
-          <div className="rules-block">
-            <div className="muted small">AUTO-APPROVAL THRESHOLD</div>
-            <div className="money-input">
-              <span className="muted">SAR</span>
-              <input
-                value={rules.autoApprovalThresholdSar}
-                onChange={(e) => setRules({ ...rules, autoApprovalThresholdSar: Number(e.target.value || "0") })}
-              />
-            </div>
-          </div>
+        .rl-ico{
+          width:42px; height:42px;
+          border-radius:14px;
+          display:grid; place-items:center;
+          background: rgba(37,99,235,0.10);
+          color:#2563eb;
+          font-weight:1000;
+          flex:0 0 auto;
+        }
+        .rl-title{ font-weight:1000; color:#0f172a; }
+        .rl-sub{ color:#64748b; font-size:12px; font-weight:900; margin-top:2px; }
 
-          <div className="rules-toggles">
-            <div className="toggle-row">
-              <div className="toggle-label">ACCEPT STORE CREDIT</div>
-              <Switch checked={rules.acceptStoreCredit} onChange={(v) => setRules({ ...rules, acceptStoreCredit: v })} />
-            </div>
-            <div className="toggle-row">
-              <div className="toggle-label">ALLOW EXCHANGES</div>
-              <Switch checked={rules.allowExchanges} onChange={(v) => setRules({ ...rules, allowExchanges: v })} />
-            </div>
-            <div className="toggle-row">
-              <div className="toggle-label">AUTO-APPROVE LOW VALUE</div>
-              <Switch checked={rules.autoApproveLowValue} onChange={(v) => setRules({ ...rules, autoApproveLowValue: v })} />
-            </div>
-          </div>
+        .rl-body{ padding:14px; background:#fff; display:flex; flex-direction:column; gap:12px; }
 
-          <Button className="big-save" variant="dark" onClick={save} disabled={saving}>
-            {saving ? "Saving..." : "Save Architecture"}
-          </Button>
-        </Card>
+        .rl-block{
+          border:1px solid #e6e8f0;
+          border-radius:16px;
+          padding:12px;
+          background:#f8fafc;
+          display:flex;
+          flex-direction:column;
+          gap:10px;
+        }
 
-        <Card className="rules-right">
-          <div className="rules-title">
-            <div className="rules-ico">🎚</div>
-            <div>
-              <div className="strong">Category Governance</div>
-              <div className="muted small">Overrides by category</div>
-            </div>
-          </div>
+        .rl-rowSpace{
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap: 10px;
+          flex-wrap:wrap;
+        }
 
-          <div className="cat-list">
-            {rules.categoryOverrides.map((c) => (
-              <div className="cat-card" key={c.category}>
-                <div>
-                  <div className="strong">{c.category}</div>
-                  <div className={`muted small ${c.mode === "NON_RETURNABLE" ? "red" : c.mode === "DAY_LIMIT" ? "orange" : "green"}`}>
-                    {c.label}
-                  </div>
-                </div>
-                <button className="trash" aria-label="delete">🗑</button>
+        .rl-label{
+          font-size:12px;
+          font-weight:1000;
+          letter-spacing:.6px;
+          color:#64748b;
+        }
+
+        .rl-strong{ font-weight:1000; color:#0f172a; }
+
+        .rl-range{ width:100%; }
+
+        .rl-money{
+          display:flex;
+          align-items:center;
+          gap:8px;
+          border:1px solid #e6e8f0;
+          background:#fff;
+          border-radius:14px;
+          padding:10px 12px;
+        }
+        .rl-money input{
+          border:none;
+          outline:none;
+          width:100%;
+          font-weight:1000;
+          color:#0f172a;
+          background:transparent;
+        }
+
+        .rl-toggles{
+          display:flex;
+          flex-direction:column;
+          gap:10px;
+        }
+
+        .rl-toggleRow{
+          display:flex;
+          align-items:center;
+          justify-content:space-between;
+          gap: 12px;
+          padding:12px;
+          border:1px solid #e6e8f0;
+          border-radius:16px;
+          background:#fff;
+        }
+
+        .rl-save{
+          width:100%;
+          border-radius:14px;
+        }
+
+        /* Right side categories */
+        .rl-catList{
+          display:grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 12px;
+        }
+
+        .rl-catCard{
+          border:1px solid #e6e8f0;
+          border-radius:16px;
+          background:#fff;
+          padding:12px;
+          display:flex;
+          align-items:flex-start;
+          justify-content:space-between;
+          gap: 10px;
+        }
+        .rl-pill{
+          font-size:12px;
+          font-weight:1000;
+          color:#64748b;
+        }
+        .rl-pill.red{ color:#b91c1c; }
+        .rl-pill.orange{ color:#b45309; }
+        .rl-pill.green{ color:#047857; }
+
+        .rl-trash{
+          border:1px solid #e6e8f0;
+          background:#fff;
+          border-radius:12px;
+          width:38px; height:38px;
+          cursor:pointer;
+        }
+
+        .rl-dashed{
+          width:100%;
+          border:1px dashed #cbd5e1;
+          background:#f8fafc;
+          border-radius:16px;
+          padding:12px;
+          font-weight:1000;
+          cursor:pointer;
+        }
+
+        @media (max-width: 980px){
+          .rl-grid{ grid-template-columns: 1fr; }
+        }
+      `}</style>
+
+      <Toast
+        open={toast.open}
+        type={toast.type}
+        message={toast.msg}
+        onClose={() => setToast((t) => ({ ...t, open: false }))}
+      />
+
+      <div className="rl-wrap">
+        <div className="rl-grid">
+          {/* LEFT */}
+          <Card className="rl-card">
+            <div className="rl-head">
+              <div className="rl-ico">🛡</div>
+              <div style={{ minWidth: 0 }}>
+                <div className="rl-title">Automation Core</div>
+                <div className="rl-sub">Define global automation rules</div>
               </div>
-            ))}
+            </div>
 
-            <button className="dashed-btn" type="button" onClick={() => setToast({ open: true, type: "info", msg: "Override builder comes next." })}>
-              + DEPLOY CATEGORY OVERRIDE
-            </button>
-          </div>
-        </Card>
+            <div className="rl-body">
+              <div className="rl-block">
+                <div className="rl-rowSpace">
+                  <div className="rl-label">RETURN WINDOW</div>
+                  <div className="rl-strong">{rules.returnWindowDays} DAYS</div>
+                </div>
+                <input
+                  className="rl-range"
+                  type="range"
+                  min={1}
+                  max={60}
+                  value={rules.returnWindowDays}
+                  onChange={(e) =>
+                    setRules({ ...rules, returnWindowDays: Number(e.target.value) })
+                  }
+                />
+              </div>
+
+              <div className="rl-block">
+                <div className="rl-label">AUTO-APPROVAL THRESHOLD</div>
+                <div className="rl-money">
+                  <span className="rl-label">SAR</span>
+                  <input
+                    value={rules.autoApprovalThresholdSar}
+                    onChange={(e) =>
+                      setRules({
+                        ...rules,
+                        autoApprovalThresholdSar: Number(e.target.value || "0"),
+                      })
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="rl-toggles">
+                <div className="rl-toggleRow">
+                  <div className="rl-strong">ACCEPT STORE CREDIT</div>
+                  <Switch
+                    checked={rules.acceptStoreCredit}
+                    onChange={(v) => setRules({ ...rules, acceptStoreCredit: v })}
+                  />
+                </div>
+                <div className="rl-toggleRow">
+                  <div className="rl-strong">ALLOW EXCHANGES</div>
+                  <Switch
+                    checked={rules.allowExchanges}
+                    onChange={(v) => setRules({ ...rules, allowExchanges: v })}
+                  />
+                </div>
+                <div className="rl-toggleRow">
+                  <div className="rl-strong">AUTO-APPROVE LOW VALUE</div>
+                  <Switch
+                    checked={rules.autoApproveLowValue}
+                    onChange={(v) => setRules({ ...rules, autoApproveLowValue: v })}
+                  />
+                </div>
+              </div>
+
+              <Button className="rl-save" variant="dark" onClick={save} disabled={saving}>
+                {saving ? "Saving..." : "Save Architecture"}
+              </Button>
+            </div>
+          </Card>
+
+          {/* RIGHT */}
+          <Card className="rl-card">
+            <div className="rl-head">
+              <div className="rl-ico">🎚</div>
+              <div style={{ minWidth: 0 }}>
+                <div className="rl-title">Category Governance</div>
+                <div className="rl-sub">Overrides by category</div>
+              </div>
+            </div>
+
+            <div className="rl-body">
+              <div className="rl-catList">
+                {rules.categoryOverrides.map((c) => (
+                  <div className="rl-catCard" key={c.category}>
+                    <div style={{ minWidth: 0 }}>
+                      <div className="rl-strong">{c.category}</div>
+                      <div
+                        className={`rl-pill ${
+                          c.mode === "NON_RETURNABLE"
+                            ? "red"
+                            : c.mode === "DAY_LIMIT"
+                            ? "orange"
+                            : "green"
+                        }`}
+                      >
+                        {c.label}
+                      </div>
+                    </div>
+                    <button className="rl-trash" aria-label="delete" type="button">
+                      🗑
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <button
+                className="rl-dashed"
+                type="button"
+                onClick={() =>
+                  setToast({ open: true, type: "info", msg: "Override builder comes next." })
+                }
+              >
+                + DEPLOY CATEGORY OVERRIDE
+              </button>
+            </div>
+          </Card>
+        </div>
       </div>
     </>
   );
