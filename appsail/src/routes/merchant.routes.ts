@@ -13,10 +13,86 @@ import {
 } from "../lib/tenantResolve";
 import { ReturnRequestsRepo } from "../repositories/returnRequests.repo";
 import { ReturnItemsRepo } from "../repositories/returnItems.repo";
+
+import {
+  approveReturnSchema,
+  receiveReturnSchema,
+  resolveReturnSchema,
+} from "../validators/merchantReturns.zod";
+
 import { MerchantReturnsService } from "../services/merchantReturns.service";
 
 export const merchantRoutes = Router();
 
+/**
+ * -----------------------------
+ * Route helpers / local schemas
+ * -----------------------------
+ */
+
+const returnNumberParamSchema = z.object({
+  return_number: z.string().min(1),
+});
+
+const itemDecisionSchema = z.object({
+  return_item_id: z.string().regex(/^\d+$/, "return_item_id must be digits"),
+  decision: z.enum(["approved", "rejected", "pending"]),
+  decision_reason: z.string().max(500).optional(),
+});
+
+const setItemsSchema = z.object({
+  items: z.array(itemDecisionSchema).min(1),
+});
+
+const approveBodySchema = approveReturnSchema.extend({
+  notes_internal: z.string().max(2000).optional(),
+  items: z.array(itemDecisionSchema).optional(),
+});
+
+const rejectBodySchema = z.object({
+  status_reason: z.string().max(500).optional(),
+  notes_internal: z.string().max(2000).optional(),
+});
+
+const receivedBodySchema = receiveReturnSchema.extend({
+  notes_internal: z.string().max(2000).optional(),
+});
+
+const resolveBodySchema = resolveReturnSchema
+  .extend({
+    type: z.enum(["refund", "exchange", "store_credit"]),
+    refund_transaction_id_external: z.string().optional(),
+    exchange_order_id_external: z.string().optional(),
+    store_credit_ref_external: z.string().optional(),
+    notes_internal: z.string().max(2000).optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.type === "refund" && !val.refund_transaction_id_external) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["refund_transaction_id_external"],
+        message: "refund_transaction_id_external is required when type=refund",
+      });
+    }
+    if (val.type === "exchange" && !val.exchange_order_id_external) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["exchange_order_id_external"],
+        message: "exchange_order_id_external is required when type=exchange",
+      });
+    }
+    if (val.type === "store_credit" && !val.store_credit_ref_external) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["store_credit_ref_external"],
+        message: "store_credit_ref_external is required when type=store_credit",
+      });
+    }
+  });
+
+/**
+ * ✅ Base route so GET /merchant doesn't return NOT_FOUND
+ */
 merchantRoutes.get("/", (_req, res) => {
   res.json({
     ok: true,
@@ -24,13 +100,14 @@ merchantRoutes.get("/", (_req, res) => {
     routes: [
       "POST /merchant/tenants",
       "GET  /merchant/oauth/start?portal_public_slug=...",
+      "POST /merchant/oauth/start",
+      "GET  /merchant/oauth/status?portal_public_slug=...",
 
       "GET  /merchant/:tenantSlug/kpis",
 
       "GET  /merchant/:tenantSlug/returns",
       "GET  /merchant/:tenantSlug/returns/:return_number",
 
-      // ✅ NEW actions
       "POST /merchant/:tenantSlug/returns/:return_number/items",
       "POST /merchant/:tenantSlug/returns/:return_number/approve",
       "POST /merchant/:tenantSlug/returns/:return_number/reject",
@@ -194,7 +271,7 @@ merchantRoutes.get("/oauth/status", async (req: any, res, next) => {
 
 /**
  * -----------------------------------------
- * Tenant-aware Merchant API
+ * Tenant-aware Merchant API (kept)
  * -----------------------------------------
  */
 
@@ -353,12 +430,7 @@ merchantRoutes.get("/:tenantSlug/returns", authMerchant, async (req: any, res, n
 merchantRoutes.get("/:tenantSlug/returns/:return_number", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
-
-    const params = z
-      .object({
-        return_number: z.string().min(1),
-      })
-      .parse(req.params);
+    const params = returnNumberParamSchema.parse(req.params);
 
     const rr = await ReturnRequestsRepo.findByReturnNumber(req, tenant.ROWID, params.return_number);
     if (!rr) throw new AppError(404, "Return not found", "RETURN_NOT_FOUND");
@@ -411,38 +483,21 @@ merchantRoutes.get("/:tenantSlug/returns/:return_number", authMerchant, async (r
 
 /**
  * ----------------------------
- * ✅ NEW merchant action routes
+ * ✅ Merchant action routes
  * ----------------------------
  */
 
 merchantRoutes.post("/:tenantSlug/returns/:return_number/items", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
-    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
-
-    const body = z
-      .object({
-        items: z
-          .array(
-            z.object({
-              return_item_id: z.string().min(1),
-              decision: z.string().min(1),
-              decision_reason: z.string().optional(),
-            })
-          )
-          .min(1),
-      })
-      .parse(req.body ?? {});
+    const params = returnNumberParamSchema.parse(req.params);
+    const body = setItemsSchema.parse(req.body ?? {});
 
     const { rr, items } = await MerchantReturnsService.setItemDecisions(
       req,
       tenant.ROWID,
       params.return_number,
-      body.items.map((it) => ({
-        return_item_id: it.return_item_id,
-        decision: it.decision,
-        decision_reason: it.decision_reason,
-      }))
+      body.items
     );
 
     return res.json({ ok: true, return_request_id: rr.ROWID, return_number: rr.return_number, items });
@@ -454,32 +509,13 @@ merchantRoutes.post("/:tenantSlug/returns/:return_number/items", authMerchant, a
 merchantRoutes.post("/:tenantSlug/returns/:return_number/approve", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
-    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
-
-    const body = z
-      .object({
-        status_reason: z.string().optional(),
-        notes_internal: z.string().optional(),
-        items: z
-          .array(
-            z.object({
-              return_item_id: z.string().min(1),
-              decision: z.string().min(1),
-              decision_reason: z.string().optional(),
-            })
-          )
-          .optional(),
-      })
-      .parse(req.body ?? {});
+    const params = returnNumberParamSchema.parse(req.params);
+    const body = approveBodySchema.parse(req.body ?? {});
 
     const { rr, items } = await MerchantReturnsService.approve(req, tenant.ROWID, params.return_number, {
       status_reason: body.status_reason,
       notes_internal: body.notes_internal,
-      items: body.items?.map((it) => ({
-        return_item_id: it.return_item_id,
-        decision: it.decision,
-        decision_reason: it.decision_reason,
-      })),
+      items: body.items,
     });
 
     return res.json({ ok: true, return_request_id: rr.ROWID, return_number: rr.return_number, status: "approved", items });
@@ -491,23 +527,12 @@ merchantRoutes.post("/:tenantSlug/returns/:return_number/approve", authMerchant,
 merchantRoutes.post("/:tenantSlug/returns/:return_number/reject", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
-    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
-
-    const body = z
-      .object({
-        status_reason: z.string().optional(),
-        notes_internal: z.string().optional(),
-      })
-      .parse(req.body ?? {});
+    const params = returnNumberParamSchema.parse(req.params);
+    const body = rejectBodySchema.parse(req.body ?? {});
 
     const { rr } = await MerchantReturnsService.reject(req, tenant.ROWID, params.return_number, body);
 
-    return res.json({
-      ok: true,
-      return_request_id: rr.ROWID,
-      return_number: rr.return_number,
-      status: "rejected",
-    });
+    return res.json({ ok: true, return_request_id: rr.ROWID, return_number: rr.return_number, status: "rejected" });
   } catch (e) {
     next(e);
   }
@@ -516,23 +541,12 @@ merchantRoutes.post("/:tenantSlug/returns/:return_number/reject", authMerchant, 
 merchantRoutes.post("/:tenantSlug/returns/:return_number/received", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
-    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
-
-    const body = z
-      .object({
-        status_reason: z.string().optional(),
-        notes_internal: z.string().optional(),
-      })
-      .parse(req.body ?? {});
+    const params = returnNumberParamSchema.parse(req.params);
+    const body = receivedBodySchema.parse(req.body ?? {});
 
     const { rr } = await MerchantReturnsService.markReceived(req, tenant.ROWID, params.return_number, body);
 
-    return res.json({
-      ok: true,
-      return_request_id: rr.ROWID,
-      return_number: rr.return_number,
-      status: "received",
-    });
+    return res.json({ ok: true, return_request_id: rr.ROWID, return_number: rr.return_number, status: "received" });
   } catch (e) {
     next(e);
   }
@@ -541,18 +555,8 @@ merchantRoutes.post("/:tenantSlug/returns/:return_number/received", authMerchant
 merchantRoutes.post("/:tenantSlug/returns/:return_number/resolve", authMerchant, async (req: any, res, next) => {
   try {
     const tenant = req.tenant ?? (await resolveTenantFromRouteParam(req, "tenantSlug"));
-    const params = z.object({ return_number: z.string().min(1) }).parse(req.params);
-
-    const body = z
-      .object({
-        type: z.enum(["refund", "exchange", "store_credit"]),
-        refund_transaction_id_external: z.string().optional(),
-        exchange_order_id_external: z.string().optional(),
-        store_credit_ref_external: z.string().optional(),
-        status_reason: z.string().optional(),
-        notes_internal: z.string().optional(),
-      })
-      .parse(req.body ?? {});
+    const params = returnNumberParamSchema.parse(req.params);
+    const body = resolveBodySchema.parse(req.body ?? {});
 
     const { rr } = await MerchantReturnsService.resolve(req, tenant.ROWID, params.return_number, body);
 
