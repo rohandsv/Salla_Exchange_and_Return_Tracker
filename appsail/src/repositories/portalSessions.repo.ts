@@ -1,8 +1,15 @@
+// appsail/src/repositories/portalSessions.repo.ts
 import { getCatalystApp } from "../lib/catalyst";
 import { toCatalystDateTime } from "../lib/datetime";
 
 function q(value: string) {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function assertRowIdDigits(id: any) {
+  const v = String(id ?? "").trim();
+  if (!/^\d+$/.test(v)) throw new Error("ROWID must be digits");
+  return v;
 }
 
 export type PortalSessionRow = {
@@ -56,8 +63,10 @@ export class PortalSessionsRepo {
 
   static async touchLastSeen(req: any, rowId: string) {
     const app = getCatalystApp(req);
+    const rid = assertRowIdDigits(rowId);
+
     return app.datastore().table(this.tableName).updateRow({
-      ROWID: rowId,
+      ROWID: rid,
       last_seen_at: toCatalystDateTime(new Date()),
     });
   }

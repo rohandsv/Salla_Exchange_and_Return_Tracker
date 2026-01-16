@@ -2,10 +2,7 @@
 import { z } from "zod";
 import { env } from "../env";
 import { TenantsRepo } from "../repositories/tenants.repo";
-import { AppError } from "./errors"; // <- if your AppError path is ../lib/errors, change this import accordingly
-// NOTE: In your project AppError is at "../lib/errors"
-// If you get a TS error here, replace import with:
-// import { AppError } from "../lib/errors";
+import { AppError } from "../lib/errors";
 
 function isTruthy(v: any) {
   const s = String(v ?? "").trim().toLowerCase();
@@ -57,9 +54,6 @@ export async function resolveTenantFromRouteParam(req: any, paramName: string) {
   return resolveTenantByPortalSlug(req, slug);
 }
 
-/**
- * Handy schema for route params usage if needed elsewhere.
- */
 export const tenantSlugParamSchema = z.object({
   tenantSlug: z.string().min(1),
 });

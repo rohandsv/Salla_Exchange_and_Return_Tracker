@@ -43,14 +43,9 @@ app.use((req, res, next) => {
     return next(new AppError(403, "CORS not allowed", "CORS_NOT_ALLOWED"));
   }
 
-  // Set CORS headers
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
-
-  // If you ever add cookies, switch this to true AND set specific origins only.
   res.setHeader("Access-Control-Allow-Credentials", "false");
-
-  // Allow typical headers
   res.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization, X-Request-Id, X-Merchant-Debug-Key"
@@ -70,9 +65,23 @@ app.set("json replacer", (_k: string, v: unknown) =>
   typeof v === "bigint" ? (v as bigint).toString() : v
 );
 
+// ✅ Webhooks MUST capture raw body exactly once
 app.use("/webhooks", express.json({ limit: "2mb", verify: rawBodySaver }));
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+
+// ✅ Create parsers once (do not instantiate per request)
+const jsonParser = express.json({ limit: "1mb" });
+const urlParser = express.urlencoded({ extended: true, limit: "1mb" });
+
+// ✅ Skip global parsers for /webhooks (no double parsing / no rawBody loss)
+app.use((req, res, next) => {
+  if (req.path.startsWith("/webhooks")) return next();
+  return jsonParser(req, res, next);
+});
+
+app.use((req, res, next) => {
+  if (req.path.startsWith("/webhooks")) return next();
+  return urlParser(req, res, next);
+});
 
 app.use("/health", healthRoutes);
 app.use("/portal", portalRoutes);

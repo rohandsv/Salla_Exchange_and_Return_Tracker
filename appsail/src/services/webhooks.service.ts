@@ -1,8 +1,10 @@
+// appsail/src/services/webhooks.service.ts
 import { AppError } from "../lib/errors";
 import { toCatalystDateTime } from "../lib/datetime";
 import { encryptText } from "../lib/crypto";
 import { TenantsRepo } from "../repositories/tenants.repo";
 import { SallaOauthTokensRepo } from "../repositories/sallaOauthTokens.repo";
+import { WebhookEventsRepo } from "../repositories/webhookEvents.repo";
 
 export type SallaWebhookEvent = {
   event?: string;
@@ -28,19 +30,14 @@ function normalizeEventType(evt: SallaWebhookEvent): string {
 }
 
 function extractMerchantId(evt: SallaWebhookEvent): string | null {
-  const v = evt.merchant ?? evt.store_id ?? evt.data?.merchant ?? evt.data?.store_id;
+  const v = evt.merchant ?? evt.store_id ?? evt.data?.merchant ?? evt.data?.store_id ?? evt.data?.store?.id ?? evt.store?.id;
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
   return s ? s : null;
 }
 
 function extractPortalSlug(evt: SallaWebhookEvent): string | null {
-  const v =
-    evt.portal_public_slug ??
-    evt.data?.portal_public_slug ??
-    evt.meta?.portal_public_slug ??
-    evt.data?.meta?.portal_public_slug;
-
+  const v = evt.portal_public_slug ?? evt.data?.portal_public_slug ?? evt.meta?.portal_public_slug ?? evt.data?.meta?.portal_public_slug;
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
   return s ? s : null;
@@ -71,9 +68,14 @@ function toExpiresAt(expiresInSeconds: number): string | null {
 function isUninstallEvent(t: string) {
   return !!t && t.includes("uninstall");
 }
-
 function isAuthorizeEvent(t: string) {
   return t === "app.store.authorize" || (t.includes("app") && t.includes("authorize"));
+}
+function isInstallEvent(t: string) {
+  return t === "app.store.install" || (t.includes("app") && t.includes("install"));
+}
+function isUpdateEvent(t: string) {
+  return t === "app.store.update" || (t.includes("app") && t.includes("update"));
 }
 
 async function resolveTenantId(req: any, tenantIdOrNull: string | null, storeId: string | null, portalSlug: string | null) {
@@ -92,11 +94,17 @@ async function resolveTenantId(req: any, tenantIdOrNull: string | null, storeId:
   return null;
 }
 
+/**
+ * Deterministic lifecycle handler.
+ * - install/update => ensure tenant by portal slug (if present)
+ * - authorize => MUST resolve tenant (storeId/portalSlug), but if portalSlug exists we auto-ensure
+ */
 export async function handleSallaWebhook(req: any, tenantIdOrNull: string | null, event: SallaWebhookEvent) {
   const t = normalizeEventType(event);
   const storeId = extractMerchantId(event);
   const portalSlug = extractPortalSlug(event);
 
+  // 1) uninstall
   if (isUninstallEvent(t)) {
     const tid = await resolveTenantId(req, tenantIdOrNull, storeId, portalSlug);
     if (!tid) return { ok: true, handled: "uninstall", tenant: null };
@@ -108,13 +116,39 @@ export async function handleSallaWebhook(req: any, tenantIdOrNull: string | null
     return { ok: true, handled: "uninstall", tenant: tid };
   }
 
+  // 2) install/update => ensure tenant by portal slug (so authorize later can link)
+  if (isInstallEvent(t) || isUpdateEvent(t)) {
+    if (!portalSlug) return { ok: true, handled: "ignored", type: t || null };
+
+    const tenant = await TenantsRepo.ensureTenantByPortalSlug(req, portalSlug, {
+      status: "installed_pending_authorize",
+      plan_code: "free",
+    });
+
+    // if storeId is present, attach it (helps future routing)
+    if (storeId) {
+      await TenantsRepo.updateSallaConnectionFields(req, tenant.ROWID, {
+        salla_store_id: storeId,
+        status: "installed_pending_authorize",
+      });
+    } else {
+      await TenantsRepo.updateSallaConnectionFields(req, tenant.ROWID, { status: "installed_pending_authorize" });
+    }
+
+    return { ok: true, handled: isInstallEvent(t) ? "install" : "update", tenant: tenant.ROWID, store_id: storeId ?? null };
+  }
+
+  // 3) authorize
   if (isAuthorizeEvent(t)) {
     if (!storeId) throw new AppError(400, "Missing merchant id in authorize event", "AUTHORIZE_MISSING_MERCHANT");
 
-    const tid = await resolveTenantId(req, tenantIdOrNull, storeId, portalSlug);
-    if (!tid) {
-      throw new AppError(404, "Tenant not resolved for authorize event", "TENANT_NOT_RESOLVED");
+    // If portalSlug exists, ensure tenant (install might not have been called manually)
+    if (portalSlug) {
+      await TenantsRepo.ensureTenantByPortalSlug(req, portalSlug, { status: "installed_pending_authorize", plan_code: "free" }).catch(() => null);
     }
+
+    const tid = await resolveTenantId(req, tenantIdOrNull, storeId, portalSlug);
+    if (!tid) throw new AppError(404, "Tenant not resolved for authorize event", "TENANT_NOT_RESOLVED");
 
     const tokens = extractTokens(event);
     if (!tokens) throw new AppError(400, "Missing tokens in authorize event", "AUTHORIZE_MISSING_TOKENS");
@@ -146,4 +180,47 @@ export async function handleSallaWebhook(req: any, tenantIdOrNull: string | null
   }
 
   return { ok: true, handled: "ignored", type: t || null };
+}
+
+function safeJsonParse<T = any>(s: string, fallback: T): T {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return fallback;
+  }
+}
+
+export async function processPendingSallaWebhooks(req: any, opts: { limit?: number; maxRetries?: number } = {}) {
+  const limit = Number.isFinite(opts.limit) && (opts.limit as number) > 0 ? (opts.limit as number) : 25;
+  const maxRetries = Number.isFinite(opts.maxRetries) && (opts.maxRetries as number) >= 0 ? (opts.maxRetries as number) : 5;
+
+  const rows = await WebhookEventsRepo.listPendingBatch(req, { limit, maxRetries });
+
+  let done = 0;
+  let failed = 0;
+  let ignored = 0;
+
+  for (const row of rows) {
+    await WebhookEventsRepo.markProcessing(req, row.ROWID).catch(() => null);
+
+    if (!row.signature_valid) {
+      await WebhookEventsRepo.markDone(req, row.ROWID).catch(() => null);
+      ignored++;
+      continue;
+    }
+
+    const eventObj = safeJsonParse<SallaWebhookEvent>(row.payload_json, {} as any);
+    const tenantIdOrNull = row.tenant_id == null ? null : String(row.tenant_id);
+
+    try {
+      await handleSallaWebhook(req, tenantIdOrNull, eventObj);
+      await WebhookEventsRepo.markDone(req, row.ROWID).catch(() => null);
+      done++;
+    } catch {
+      await WebhookEventsRepo.markFailedAndIncrementRetry(req, row.ROWID, row.retry_count).catch(() => null);
+      failed++;
+    }
+  }
+
+  return { ok: true, scanned: rows.length, done, failed, ignored };
 }

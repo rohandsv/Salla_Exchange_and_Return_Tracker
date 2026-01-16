@@ -231,63 +231,67 @@ export class SallaOAuthService {
 
     const tenantId = assertDigits(st.tenant_id);
 
-    const form = new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: redirectUri,
-      code,
-    });
-
-    const { ok, status, text, json } = await httpForm(tokenUrl, form);
-
-    if (!ok) {
-      throw new AppError(400, "Token exchange failed", "OAUTH_TOKEN_EXCHANGE_FAILED", `HTTP ${status}: ${text}`);
-    }
-
-    const accessToken = String(json.access_token || "").trim();
-    const refreshToken = String(json.refresh_token || "").trim();
-    const tokenType = json.token_type ? String(json.token_type) : "Bearer";
-    const expiresIn = Number(json.expires_in || 0);
-    const scope = json.scope ? String(json.scope) : null;
-
-    if (!accessToken) throw new AppError(400, "Missing access_token", "OAUTH_TOKEN_INVALID");
-
-    await OAuthStatesRepo.deleteByRowId(req, st.ROWID);
-
-    const nowStr = toCatalystDateTime(new Date());
-    const accessTokenExpiresAt = toExpiresAt(expiresIn);
-
-    const tenantUniqueKey = await this.getTenantUniqueKey(req, tenantId);
-    const existing = await SallaOauthTokensRepo.findByTenantId(req, tenantId);
-
-    await SallaOauthTokensRepo.upsertByTenant(req, tenantId, {
-      tenant_unique_key: existing?.tenant_unique_key ? String(existing.tenant_unique_key) : tenantUniqueKey,
-      token_status: "active",
-      access_token_enc: encryptText(accessToken),
-      refresh_token_enc: refreshToken ? encryptText(refreshToken) : existing?.refresh_token_enc ?? null,
-      token_type: tokenType,
-      scopes: scope,
-      access_token_expires_at: accessTokenExpiresAt,
-      last_token_refresh_at: nowStr,
-      installed_at: existing?.installed_at ? String(existing.installed_at) : nowStr,
-      uninstalled_at: null,
-    });
-
-    const storeInfo = await verifyStoreProfile(accessToken).catch(() => null);
-
-    if (storeInfo) {
-      await TenantsRepo.updateSallaConnectionFields(req, tenantId, {
-        salla_store_id: storeInfo.salla_store_id ?? "",
-        store_name: storeInfo.store_name ?? "",
-        store_domain: storeInfo.store_domain ?? null,
-        status: "connected",
+    // ✅ single-use state: delete no matter what happens next
+    try {
+      const form = new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+        code,
       });
-      return { ok: true, verified: true };
-    }
 
-    await TenantsRepo.updateSallaConnectionFields(req, tenantId, { status: "connected_unverified" });
-    return { ok: true, verified: false };
+      const { ok, status, text, json } = await httpForm(tokenUrl, form);
+
+      if (!ok) {
+        throw new AppError(400, "Token exchange failed", "OAUTH_TOKEN_EXCHANGE_FAILED", `HTTP ${status}: ${text}`);
+      }
+
+      const accessToken = String(json.access_token || "").trim();
+      const refreshToken = String(json.refresh_token || "").trim();
+      const tokenType = json.token_type ? String(json.token_type) : "Bearer";
+      const expiresIn = Number(json.expires_in || 0);
+      const scope = json.scope ? String(json.scope) : null;
+
+      if (!accessToken) throw new AppError(400, "Missing access_token", "OAUTH_TOKEN_INVALID");
+
+      const nowStr = toCatalystDateTime(new Date());
+      const accessTokenExpiresAt = toExpiresAt(expiresIn);
+
+      const tenantUniqueKey = await this.getTenantUniqueKey(req, tenantId);
+      const existing = await SallaOauthTokensRepo.findByTenantId(req, tenantId);
+
+      await SallaOauthTokensRepo.upsertByTenant(req, tenantId, {
+        tenant_unique_key: existing?.tenant_unique_key ? String(existing.tenant_unique_key) : tenantUniqueKey,
+        token_status: "active",
+        access_token_enc: encryptText(accessToken),
+        refresh_token_enc: refreshToken ? encryptText(refreshToken) : existing?.refresh_token_enc ?? null,
+        token_type: tokenType,
+        scopes: scope,
+        access_token_expires_at: accessTokenExpiresAt,
+        last_token_refresh_at: nowStr,
+        installed_at: existing?.installed_at ? String(existing.installed_at) : nowStr,
+        uninstalled_at: null,
+      });
+
+      const storeInfo = await verifyStoreProfile(accessToken).catch(() => null);
+
+      if (storeInfo) {
+        await TenantsRepo.updateSallaConnectionFields(req, tenantId, {
+          salla_store_id: storeInfo.salla_store_id ?? "",
+          store_name: storeInfo.store_name ?? "",
+          store_domain: storeInfo.store_domain ?? null,
+          status: "connected",
+        });
+        return { ok: true, verified: true };
+      }
+
+      await TenantsRepo.updateSallaConnectionFields(req, tenantId, { status: "connected_unverified" });
+      return { ok: true, verified: false };
+    } finally {
+      // best-effort cleanup
+      await OAuthStatesRepo.deleteByRowId(req, st.ROWID).catch(() => null);
+    }
   }
 
   static async getValidAccessTokenForTenant(req: any, tenantId: string) {
@@ -296,16 +300,22 @@ export class SallaOAuthService {
     const tid = assertDigits(tenantId);
     const row = await SallaOauthTokensRepo.findByTenantId(req, tid);
 
-    if (!row || !row.access_token_enc || row.access_token_enc === "__revoked__") {
-      throw new AppError(409, "Salla not connected", "SALLA_NOT_CONNECTED");
+    const enc = row?.access_token_enc ? String(row.access_token_enc) : "";
+
+    // ✅ IMPORTANT: prevent decrypting placeholders like __pending_authorize__
+    if (!row || !enc || enc === "__revoked__" || enc.startsWith("__")) {
+      throw new AppError(409, "Salla not connected yet", "SALLA_NOT_CONNECTED_YET");
     }
 
-    if (row.token_status === "active" && !shouldRefresh(row.access_token_expires_at)) {
-      return decryptText(String(row.access_token_enc));
+    const status = String(row.token_status || "").toLowerCase();
+
+    // If token is active and not near expiry -> use it
+    if (status === "active" && !shouldRefresh(row.access_token_expires_at)) {
+      return decryptText(enc);
     }
 
     const refreshEnc = row.refresh_token_enc ? String(row.refresh_token_enc) : "";
-    if (!refreshEnc || refreshEnc === "__revoked__") {
+    if (!refreshEnc || refreshEnc === "__revoked__" || refreshEnc.startsWith("__")) {
       await SallaOauthTokensRepo.upsertByTenant(req, tid, { token_status: "missing_refresh_token" });
       throw new AppError(409, "Refresh token missing; reconnect required", "REFRESH_TOKEN_MISSING");
     }
@@ -319,11 +329,11 @@ export class SallaOAuthService {
       refresh_token: refreshToken,
     });
 
-    const { ok, status, text, json } = await httpForm(tokenUrl, form);
+    const { ok, status: httpStatus, text, json } = await httpForm(tokenUrl, form);
 
     if (!ok) {
       await SallaOauthTokensRepo.upsertByTenant(req, tid, { token_status: "refresh_failed" });
-      throw new AppError(502, "Token refresh failed", "OAUTH_REFRESH_FAILED", `HTTP ${status}: ${text}`);
+      throw new AppError(502, "Token refresh failed", "OAUTH_REFRESH_FAILED", `HTTP ${httpStatus}: ${text}`);
     }
 
     const newAccess = String(json.access_token || "").trim();

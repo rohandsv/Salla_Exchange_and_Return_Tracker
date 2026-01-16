@@ -1,4 +1,59 @@
+// appsail/src/env.ts
+import fs from "node:fs";
+import path from "node:path";
 import { z } from "zod";
+
+/**
+ * Minimal .env loader (no external deps) for local/dev runs.
+ * - Catalyst/AppSail production injects envs: we don't override those.
+ * - We only set keys that are currently undefined in process.env.
+ */
+function loadDotEnvIfNeeded() {
+  const nodeEnv = String(process.env.NODE_ENV ?? "").toLowerCase();
+  const catalystEnv = String(process.env.CATALYST_ENV ?? "").toLowerCase();
+  const isProd = nodeEnv === "production" || catalystEnv === "production";
+
+  if (isProd) return;
+
+  const candidates = [
+    path.resolve(process.cwd(), ".env"),
+    path.resolve(process.cwd(), "..", ".env"),
+    path.resolve(__dirname, "..", ".env"), // dist/.env fallback after build
+    path.resolve(__dirname, "..", "..", ".env"),
+  ];
+
+  const envPath = candidates.find((p) => fs.existsSync(p));
+  if (!envPath) return;
+
+  const content = fs.readFileSync(envPath, "utf8");
+  const lines = content.split(/\r?\n/);
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+
+    const key = line.slice(0, eq).trim();
+    let val = line.slice(eq + 1).trim();
+
+    // strip surrounding quotes
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+
+    // don't override if already present
+    if (process.env[key] === undefined) {
+      process.env[key] = val;
+    }
+  }
+}
+
+loadDotEnvIfNeeded();
 
 const num = (def: number) =>
   z.preprocess((v) => {

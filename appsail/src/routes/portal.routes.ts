@@ -1,3 +1,4 @@
+// appsail/src/routes/portal.routes.ts
 import { Router } from "express";
 import { requestOtpSchema, verifyOtpSchema } from "../validators/portal.zod";
 import {
@@ -13,6 +14,12 @@ import { authPortal } from "../middlewares/authPortal";
 import { AppError } from "../lib/errors";
 
 export const portalRoutes = Router();
+
+function assertRowIdDigits(id: any) {
+  const v = String(id ?? "").trim();
+  if (!/^\d+$/.test(v)) throw new AppError(400, "tenant_id must be digits", "TENANT_ID_INVALID");
+  return v;
+}
 
 /**
  * ✅ Base route so GET /portal doesn't return NOT_FOUND
@@ -37,7 +44,8 @@ portalRoutes.get("/", (_req, res) => {
  * Resolve tenant ROWID internally using portal_public_slug.
  */
 async function resolveTenantRowId(req: any, body: any): Promise<string> {
-  if (body.tenant_id) return String(body.tenant_id);
+  // If caller sent tenant_id directly, enforce digits (ROWID)
+  if (body.tenant_id) return assertRowIdDigits(body.tenant_id);
 
   if (body.portal_public_slug) {
     const slug = String(body.portal_public_slug ?? "").trim();
@@ -59,7 +67,7 @@ async function resolveTenantRowId(req: any, body: any): Promise<string> {
     }
 
     if (!tenant) throw new AppError(404, "Unknown portal_public_slug", "TENANT_NOT_FOUND");
-    return String(tenant.ROWID);
+    return assertRowIdDigits(tenant.ROWID);
   }
 
   throw new AppError(400, "portal_public_slug is required", "TENANT_REQUIRED");

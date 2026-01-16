@@ -1,3 +1,4 @@
+// appsail/src/repositories/sallaOauthTokens.repo.ts
 import { getCatalystApp } from "../lib/catalyst";
 
 function assertRowIdDigits(id: string | number) {
@@ -61,10 +62,8 @@ export class SallaOauthTokensRepo {
 
   static async insert(req: any, row: Record<string, any>) {
     const app = getCatalystApp(req);
-
     const payload = pickAllowed(row);
     if (payload.tenant_id != null) payload.tenant_id = assertRowIdDigits(payload.tenant_id);
-
     return app.datastore().table(this.tableName).insertRow(payload);
   }
 
@@ -122,19 +121,13 @@ export class SallaOauthTokensRepo {
     const tid = assertRowIdDigits(tenantId);
     const existing = await this.findByTenantId(req, tid);
 
-    if (!existing) {
-      return this.insert(req, { tenant_id: tid, ...patch });
-    }
-
+    if (!existing) return this.insert(req, { tenant_id: tid, ...patch });
     return this.update(req, { ROWID: existing.ROWID, tenant_id: tid, ...patch });
   }
 
   static async markUninstalled(req: any, tenantId: string | number, uninstalledAt: string) {
     const tid = assertRowIdDigits(tenantId);
-    return this.upsertByTenant(req, tid, {
-      token_status: "revoked",
-      uninstalled_at: uninstalledAt,
-    });
+    return this.upsertByTenant(req, tid, { token_status: "revoked", uninstalled_at: uninstalledAt });
   }
 
   static async revoke(req: any, tenantId: string | number, uninstalledAt?: string) {

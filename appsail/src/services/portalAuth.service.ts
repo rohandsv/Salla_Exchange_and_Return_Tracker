@@ -1,3 +1,4 @@
+// appsail/src/services/portalAuth.service.ts
 import { env } from "../env";
 import { AppError } from "../lib/errors";
 import { hashContact, hashToken, randomSessionToken, verifyOtpHash } from "../lib/crypto";
@@ -10,6 +11,12 @@ export type OtpChannel = "sms" | "email";
 
 function normalizeContact(channel: OtpChannel, value: string) {
   return channel === "email" ? normalizeEmail(value) : normalizePhone(value);
+}
+
+function assertRowIdDigits(id: any) {
+  const v = String(id ?? "").trim();
+  if (!/^\d+$/.test(v)) throw new AppError(400, "tenantId must be digits", "TENANT_ID_INVALID");
+  return v;
 }
 
 export class PortalAuthService {
@@ -26,13 +33,15 @@ export class PortalAuthService {
   ) {
     const { tenantId, orderNumber, channel, contact, otp, createdIp } = args;
 
-    const normalized = normalizeContact(channel, contact);
-    const contactHash = hashContact(tenantId, channel, normalized);
+    const tenantIdSafe = assertRowIdDigits(tenantId);
 
-    const otpRow = await OtpSessionsRepo.findLatestActive(req, tenantId, channel, contactHash, orderNumber);
+    const normalized = normalizeContact(channel, contact);
+    const contactHash = hashContact(tenantIdSafe, channel, normalized);
+
+    const otpRow = await OtpSessionsRepo.findLatestActive(req, tenantIdSafe, channel, contactHash, orderNumber);
     if (!otpRow) throw new AppError(400, "Invalid OTP or expired", "OTP_INVALID");
 
-    const ok = verifyOtpHash(tenantId, orderNumber, contactHash, otp, otpRow.otp_hash);
+    const ok = verifyOtpHash(tenantIdSafe, orderNumber, contactHash, otp, otpRow.otp_hash);
     if (!ok) {
       const nextAttempt = (otpRow.attempt_count ?? 0) + 1;
 
@@ -54,7 +63,7 @@ export class PortalAuthService {
     const nowStr = toCatalystDateTime(new Date());
 
     await PortalSessionsRepo.insert(req, {
-      tenant_id: tenantId,
+      tenant_id: tenantIdSafe,
       session_token_hash: tokenHash,
       contact_hash: contactHash,
       order_number: orderNumber,
